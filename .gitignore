@@ -1,0 +1,13 @@
+.DS_Store
+build/
+.config/
+.env
+*.xcuserstate
+vendor/librime/build/
+vendor/librime/dist/
+vendor/librime/include/
+vendor/librime/lib/
+vendor/librime/bin/
+vendor/librime/share/
+server/typing-dongnanya-api/target/
+server/typing-dongnanya-api/build/
