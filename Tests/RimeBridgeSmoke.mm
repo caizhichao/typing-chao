@@ -57,12 +57,18 @@ int main(int argc, const char* argv[]) {
         [afterCommitSnapshot[@"preedit"] length] != 0) {
       return 9;
     }
+    NSDictionary<NSString*, id>* trailingSpaceSnapshot = [session processKey:@" " modifiers:@[]];
+    if ([trailingSpaceSnapshot[@"handled"] boolValue] ||
+        [trailingSpaceSnapshot[@"commitText"] length] != 0 ||
+        [trailingSpaceSnapshot[@"preedit"] length] != 0) {
+      return 12;
+    }
 
     NSDictionary<NSString*, id>* optionSnapshot = [session setOption:@"ascii_mode" enabled:YES];
     if (![optionSnapshot[@"isAsciiMode"] boolValue]) {
       return 10;
     }
-    printf("Rime bridge smoke test passed: direct text pass-through, non-consuming state snapshot, explicit commit, schema, and option\n");
+    printf("Rime bridge smoke test passed: direct text and trailing space pass-through, non-consuming state snapshot, explicit commit, schema, and option\n");
   }
   return 0;
 }

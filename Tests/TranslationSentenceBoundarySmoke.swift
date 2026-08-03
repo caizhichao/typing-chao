@@ -51,6 +51,13 @@ struct TranslationSentenceBoundarySmoke {
         ) else {
             fatalError("secure input must not send a request")
         }
+        guard TranslationPolicy.preservesDraftForUnhandledKey(" "),
+              TranslationPolicy.preservesDraftForUnhandledKey("space") else {
+            fatalError("host-inserted spaces must restart debounce without clearing the draft")
+        }
+        guard !TranslationPolicy.preservesDraftForUnhandledKey("Tab") else {
+            fatalError("focus-changing keys must not keep a stale translation draft")
+        }
     }
 
     private static func verifyRange(_ documentText: String, expectedText: String) {

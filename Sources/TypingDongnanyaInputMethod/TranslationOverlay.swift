@@ -148,6 +148,7 @@ private enum TranslationPresentation {
 
 private enum TranslationCardStyle {
     static let maximumPanelWidth: CGFloat = 960
+    static let maximumTranslationBodyHeight: CGFloat = 76
     static let cornerRadius: CGFloat = 9
     static let borderColor = NSColor(calibratedWhite: 1, alpha: 0.15)
     static let accentColor = NSColor(calibratedRed: 0.03, green: 0.68, blue: 0.59, alpha: 1)
@@ -404,13 +405,16 @@ private final class TranslationCardView: NSView {
             minimumWidth: minimumWidth
         )
         let bodyRect = NSString(string: content.bodyText).boundingRect(
-            with: NSSize(width: max(panelWidth - 24 - actionWidth, 1), height: 42),
+            with: NSSize(
+                width: max(panelWidth - 24 - actionWidth, 1),
+                height: TranslationCardStyle.maximumTranslationBodyHeight
+            ),
             options: [.usesLineFragmentOrigin],
             attributes: bodyAttributes
         )
-        var panelHeight = min(max(ceil(bodyRect.height) + 16, 36), 58)
+        var panelHeight = min(max(ceil(bodyRect.height) + 16, 36), 96)
         if content.presentation != .translation {
-            panelHeight = min(max(ceil(bodyRect.height) + 30, 52), 74)
+            panelHeight = min(max(ceil(bodyRect.height) + 30, 52), 110)
         }
         return NSSize(width: panelWidth, height: panelHeight)
     }

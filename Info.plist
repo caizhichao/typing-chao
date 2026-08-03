@@ -8,6 +8,8 @@
 	<string>Typing 东南亚</string>
 	<key>CFBundleExecutable</key>
 	<string>TypingDongnanya</string>
+	<key>CFBundleIconFile</key>
+	<string>TypingDongnanyaAppIcon.icns</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.caizhichao.typing-dongnanya.inputmethod.TypingDongnanya</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -17,9 +19,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.6.10</string>
+	<string>0.6.11</string>
 	<key>CFBundleVersion</key>
-	<string>18</string>
+	<string>19</string>
 	<key>ComponentInputModeDict</key>
 	<dict>
 		<key>tsInputModeListKey</key>
@@ -63,6 +65,8 @@
 	<string>TypingDongnanya.TypingDongnanyaInputMethodDelegate</string>
 	<key>LSBackgroundOnly</key>
 	<false/>
+	<key>LSHasLocalizedDisplayName</key>
+	<true/>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>LSUIElement</key>
@@ -80,6 +84,6 @@
 		<string>Hans</string>
 	</array>
 	<key>tsInputMethodIconFileKey</key>
-	<string>TypingDongnanyaMenuIconV4.pdf</string>
+	<string>TypingDongnanyaAppIcon.pdf</string>
 </dict>
 </plist>

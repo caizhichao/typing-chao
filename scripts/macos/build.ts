@@ -49,6 +49,7 @@ run("clang++", [
 const swiftFiles = [
   join(sourceRoot, "RimeSnapshot.swift"),
   join(sourceRoot, "InputMethodSettings.swift"),
+  join(sourceRoot, "InputMethodSettingsWindow.swift"),
   join(sourceRoot, "InputMethodMenu.swift"),
   join(sourceRoot, "CandidateOverlay.swift"),
   join(sourceRoot, "TranslationDraft.swift"),
@@ -97,6 +98,8 @@ chmodSync(executablePath, 0o755);
 console.log(`已构建隔离输入法包：${appRoot}`);
 
 function copyRimeData() {
+  cpSync(join(projectRoot, "Resources", "TypingDongnanyaAppIcon.pdf"), join(resourcesRoot, "TypingDongnanyaAppIcon.pdf"));
+  cpSync(join(projectRoot, "Resources", "TypingDongnanyaAppIcon.icns"), join(resourcesRoot, "TypingDongnanyaAppIcon.icns"));
   cpSync(join(projectRoot, "Resources", "TypingDongnanyaMenuIconV4.pdf"), join(resourcesRoot, "TypingDongnanyaMenuIconV4.pdf"));
   for (const localizationName of ["en.lproj", "zh-Hans.lproj", "zh_CN.lproj"]) {
     cpSync(join(projectRoot, "Resources", localizationName), join(resourcesRoot, localizationName), { recursive: true });

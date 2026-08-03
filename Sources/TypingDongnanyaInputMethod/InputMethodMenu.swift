@@ -48,6 +48,8 @@ final class InputMethodMenu: NSObject {
 
         menu.addItem(makeTranslationEnabledItem())
         menu.addItem(makeTargetLanguageItem())
+        menu.addItem(.separator())
+        menu.addItem(makeSettingsItem())
         return menu
     }
 
@@ -169,6 +171,13 @@ final class InputMethodMenu: NSObject {
             ))
         }
         menuItem.submenu = submenu
+        return menuItem
+    }
+
+    private func makeSettingsItem() -> NSMenuItem {
+        let menuItem = NSMenuItem(title: "设置…", action: #selector(openSettings(_:)), keyEquivalent: ",")
+        menuItem.keyEquivalentModifierMask = [.command]
+        menuItem.target = self
         return menuItem
     }
 
@@ -300,5 +309,9 @@ final class InputMethodMenu: NSObject {
             return
         }
         inputController?.setTranslationTargetLanguage(targetLanguage)
+    }
+
+    @objc private func openSettings(_ sender: NSMenuItem) {
+        inputController?.showSettings()
     }
 }

@@ -196,6 +196,12 @@ enum TranslationPolicy {
     static let userInitiatedDelayMilliseconds = 180
     static let maxSourceCharacters = 600
     static let sentenceBoundaryCharacters = CharacterSet(charactersIn: "。！？!?；;")
+    private static let draftPreservingUnhandledKeyNameList = [" ", "space"]
+
+    // 普通空格由宿主直接插入时只重算稳定期，不能清空上一笔已经提交的整句草稿。
+    static func preservesDraftForUnhandledKey(_ keyName: String) -> Bool {
+        draftPreservingUnhandledKeyNameList.contains(keyName)
+    }
 
     // 自动请求发现稳定期内文档原文已变化时必须重新计满一秒，手动请求直接使用当前快照。
     static func shouldRestartStableDelay(

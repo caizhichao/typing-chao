@@ -36,6 +36,9 @@ final class TypingDongnanyaInputController: IMKInputController {
         candidateOverlay.setPageHandler { [weak self] pageBackward in
             self?.changeCandidatePage(pageBackward: pageBackward)
         }
+        candidateOverlay.setSettingsHandler { [weak self] in
+            self?.showSettings()
+        }
         translationOverlay.setTranslationSelectionHandler { [weak self] in
             self?.replaceSourceTextWithTranslation()
         }
@@ -564,6 +567,14 @@ final class TypingDongnanyaInputController: IMKInputController {
         resetTranslationContext()
     }
 
+    // 候选条与输入法菜单共用同一个设置入口，窗口打开时读取当前会话快照。
+    func showSettings() {
+        InputMethodSettingsWindowController.shared.show(
+            inputController: self,
+            snapshot: latestRimeSnapshot()
+        )
+    }
+
     // 新会话先恢复本项目保存的 Rime 方案和开关；英文模式按 schema 默认值保持会话级行为。
     private func restoreStoredRimeSettings() {
         guard let rimeSession else {
@@ -689,6 +700,15 @@ final class TypingDongnanyaInputController: IMKInputController {
     // 未被 Rime 接管的按键可能由宿主直接改写文本，因此统一结束旧草稿和替换范围。
     private func handleUnhandledKey(_ keyName: String) {
         if keyName == "Shift_L" || keyName == "Shift_R" {
+            return
+        }
+        if TranslationPolicy.preservesDraftForUnhandledKey(keyName) {
+            candidateOverlay.hide()
+            guard isRemoteTranslationAllowed,
+                  translationDraft.currentSnapshot() != nil else {
+                return
+            }
+            scheduleCurrentTranslation(userInitiated: false)
             return
         }
         resetTranslationContext()

@@ -138,6 +138,23 @@ run(menuIconSmokeOutputPath, [
   join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", "TypingDongnanyaMenuIconV4.pdf"),
 ]);
 
+const appIconSmokeOutputPath = join(buildRoot, "AppIconSmoke");
+run("swiftc", [
+  "-parse-as-library",
+  "-target",
+  `${architecture}-apple-macosx13.0`,
+  "-sdk",
+  sdkPath,
+  join(projectRoot, "Tests", "AppIconSmoke.swift"),
+  "-framework",
+  "AppKit",
+  "-o",
+  appIconSmokeOutputPath,
+]);
+run(appIconSmokeOutputPath, [
+  join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", "TypingDongnanyaAppIcon.pdf"),
+]);
+
 const bridgeSmokeDirectory = join(buildRoot, "test-rime-bridge-data");
 const bridgeSmokeOutputPath = join(buildRoot, "RimeBridgeSmoke");
 mkdirSync(bridgeSmokeDirectory, { recursive: true });
@@ -245,18 +262,23 @@ function verifyBundledTranslationEndpoint() {
     throw new Error("输入法包不得关闭全局 ATS 限制");
   }
 
-  const iconFileName = "TypingDongnanyaMenuIconV4.pdf";
+  const menuIconFileName = "TypingDongnanyaMenuIconV4.pdf";
+  const appIconFileName = "TypingDongnanyaAppIcon.pdf";
+  const appIconBundleName = "TypingDongnanyaAppIcon.icns";
   const modeInfo = bundledInfo.ComponentInputModeDict?.tsInputModeListKey?.[
     "com.caizhichao.typing-dongnanya.inputmethod.TypingDongnanya.Pinyin"
   ];
   if (
-    bundledInfo.tsInputMethodIconFileKey !== iconFileName ||
-    modeInfo?.tsInputModeMenuIconFileKey !== iconFileName ||
-    modeInfo?.tsInputModePaletteIconFileKey !== iconFileName ||
-    modeInfo?.tsInputModeAlternateMenuIconFileKey !== iconFileName ||
-    !existsSync(join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", iconFileName))
+    bundledInfo.CFBundleIconFile !== appIconBundleName ||
+    bundledInfo.tsInputMethodIconFileKey !== appIconFileName ||
+    modeInfo?.tsInputModeMenuIconFileKey !== menuIconFileName ||
+    modeInfo?.tsInputModePaletteIconFileKey !== menuIconFileName ||
+    modeInfo?.tsInputModeAlternateMenuIconFileKey !== menuIconFileName ||
+    !existsSync(join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", appIconFileName)) ||
+    !existsSync(join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", appIconBundleName)) ||
+    !existsSync(join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", menuIconFileName))
   ) {
-    throw new Error("输入源必须打包当前版本的 PDF 菜单图标并在根与模式元数据中统一引用");
+    throw new Error("注册页必须使用独立彩色应用图标，菜单模式必须继续使用透明模板图标");
   }
 }
 
@@ -284,6 +306,7 @@ function readInfoPlist(infoPath: string): BundledInfo {
 }
 
 type BundledInfo = {
+  CFBundleIconFile?: string;
   TypingDongnanyaAPIBaseEndpoint?: string;
   TypingDongnanyaAPIEndpoint?: string;
   ComponentInputModeDict?: {
