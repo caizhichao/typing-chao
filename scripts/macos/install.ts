@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { existsSync, rmSync } from "node:fs";
+import { accessSync, constants, existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -28,14 +28,31 @@ const installCommand = [
   `/usr/bin/rsync -a --delete ${shellQuote(`${sourceApp}/`)} ${shellQuote(`${destinationApp}/`)}`,
   `${shellQuote(systemExecutable)} --register-input-source`,
 ].join(" && ");
-runAdministratorCommand(installCommand);
+if (isWritableExistingInstallation()) {
+  run("/usr/bin/rsync", ["-a", "--delete", `${sourceApp}/`, `${destinationApp}/`]);
+  run(systemExecutable, ["--register-input-source"]);
+} else {
+  runAdministratorCommand(installCommand);
+}
 restartInstalledInputMethod();
 restartTextInputMenuAgent();
 run(systemExecutable, ["--input-source-status"]);
 
 console.log(`已安装到系统输入法目录：${destinationApp}`);
 console.log("已请求退出旧的输入法进程；请切换到其它输入法后再切回 Typing 东南亚，以启动新版本。");
+console.log("当前版本由输入法内部 marked draft 持有完整原文；使用译文或上屏原文后才一次性提交，不扫描宿主正文，也不申请辅助功能或输入监控权限。");
 console.log("请在系统设置 -> 键盘 -> 文本输入 -> 编辑 -> + 中搜索“中文”或“Chinese”，再在中文输入法列表选择 Typing 东南亚；不要搜索产品名“东南亚”。");
+
+// 已有系统包归当前用户且可写时直接原位更新，首次安装或受保护包才请求管理员授权。
+function isWritableExistingInstallation() {
+  if (!existsSync(destinationApp)) return false;
+  try {
+    accessSync(destinationApp, constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function run(command: string, args: string[]) {
   const result = spawnSync(command, args, { stdio: "inherit" });

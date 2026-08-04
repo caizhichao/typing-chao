@@ -15,6 +15,8 @@ const resourcesRoot = join(contentsRoot, "Resources");
 const rimeDataRoot = join(resourcesRoot, "RimeData");
 const executablePath = join(contentsRoot, "MacOS", "TypingDongnanya");
 const bundleInfoPath = join(contentsRoot, "Info.plist");
+const inputMethodBundleIdentifier = "com.caizhichao.typing-dongnanya.inputmethod.TypingDongnanya";
+const localDesignatedRequirement = `=designated => identifier "${inputMethodBundleIdentifier}"`;
 const proxyAccessTokenPath = join(homedir(), ".config", "typing-dongnanya", "access-token");
 const proxyAccessToken = readProxyAccessToken();
 const sdkPath = runText("xcrun", ["--show-sdk-path"]);
@@ -48,12 +50,14 @@ run("clang++", [
 
 const swiftFiles = [
   join(sourceRoot, "RimeSnapshot.swift"),
+  join(sourceRoot, "RimeInputPolicy.swift"),
   join(sourceRoot, "InputMethodSettings.swift"),
   join(sourceRoot, "InputMethodSettingsWindow.swift"),
+  join(sourceRoot, "InputMethodApplicationDelegate.swift"),
   join(sourceRoot, "InputMethodMenu.swift"),
   join(sourceRoot, "CandidateOverlay.swift"),
+  join(sourceRoot, "InputModeStatusOverlay.swift"),
   join(sourceRoot, "TranslationDraft.swift"),
-  join(sourceRoot, "TranslationSentenceBoundary.swift"),
   join(sourceRoot, "InputMethodController.swift"),
   join(sourceRoot, "InputSourceRegistration.swift"),
   join(sourceRoot, "OverlayLayout.swift"),
@@ -93,7 +97,15 @@ const linkArguments = [
 run("swiftc", linkArguments);
 
 writeBundledInfoPlist();
-run("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", appRoot]);
+run("/usr/bin/codesign", [
+  "--force",
+  "--deep",
+  "--sign",
+  "-",
+  "--requirements",
+  localDesignatedRequirement,
+  appRoot,
+]);
 chmodSync(executablePath, 0o755);
 console.log(`已构建隔离输入法包：${appRoot}`);
 

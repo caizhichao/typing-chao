@@ -1,3 +1,7 @@
 patch:
   schema_list:
     - schema: luna_pinyin
+  # 沿用成熟 Rime 前端常见键位：Shift+Space 切换半/全角，Control+Period 切换中/西文标点。
+  "key_binder/bindings/+":
+    - { when: always, accept: Shift+space, toggle: full_shape }
+    - { when: always, accept: Control+period, toggle: ascii_punct }

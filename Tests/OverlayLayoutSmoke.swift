@@ -14,7 +14,9 @@ struct OverlayLayoutSmoke {
         verifyInvalidRectanglesAreRejected()
         verifyOffscreenRectangleIsRejected()
         verifyPanelClamping()
-        print("Overlay layout smoke test passed: attributes index 0, invalid anchor rejection, and screen clamping")
+        verifyLongTranslationClearsAdjacentLine()
+        verifyRecentAnchorReuse()
+        print("Overlay layout smoke test passed: attributes index 0, invalid anchor rejection, screen clamping, adjacent-line clearance, and recent anchor reuse")
     }
 
     // 即使宿主返回非零 firstRect，浮层也只能采用 attributes index 0 的组合区矩形。
@@ -105,6 +107,70 @@ struct OverlayLayoutSmoke {
             size: translationSize,
             anchor: anchor
         )
+    }
+
+    // 无候选条的长译文翻到光标上方时必须空出一整行，不能遮住多行输入的上一行正文。
+    private static func verifyLongTranslationClearsAdjacentLine() {
+        let client = OverlayLayoutSmokeClient(
+            attributesRect: NSRect(x: 560, y: 142, width: 1, height: 22)
+        )
+        guard let anchor = InputOverlayAnchor(client: client, screenList: screenList) else {
+            fatalError("expected multiline translation anchor")
+        }
+        let longSize = NSSize(width: 420, height: 114)
+        let longOrigin = anchor.translationOrigin(for: longSize, candidateFrame: nil)
+        guard longOrigin.y >= anchor.caretRect.maxY + anchor.caretRect.height else {
+            fatalError("long translation above the caret must clear the adjacent text line: \(longOrigin)")
+        }
+        let shortSize = NSSize(width: 200, height: 38)
+        let shortOrigin = anchor.translationOrigin(for: shortSize, candidateFrame: nil)
+        guard shortOrigin.y < anchor.caretRect.maxY + anchor.caretRect.height else {
+            fatalError("short translation should remain tightly attached to the caret: \(shortOrigin)")
+        }
+    }
+
+    // 同一编辑客户端只允许短时复用最近可信锚点，跨客户端和过期锚点必须拒绝。
+    private static func verifyRecentAnchorReuse() {
+        let firstClient = OverlayLayoutSmokeClient(
+            attributesRect: NSRect(x: 520, y: 360, width: 1, height: 20)
+        )
+        guard let currentAnchor = InputOverlayAnchor(client: firstClient, screenList: screenList) else {
+            fatalError("expected cache source anchor")
+        }
+        var anchorCache = InputOverlayAnchorCache()
+        let firstClientIdentifier = "overlay-layout-smoke:first"
+        guard anchorCache.resolve(
+            currentAnchor: currentAnchor,
+            clientIdentifier: firstClientIdentifier,
+            currentTime: 10
+        )?.caretRect == currentAnchor.caretRect,
+              anchorCache.resolve(
+                  currentAnchor: nil,
+                  clientIdentifier: firstClientIdentifier,
+                  currentTime: 15
+              )?.caretRect == currentAnchor.caretRect else {
+            fatalError("same client must reuse its recent valid anchor")
+        }
+        guard anchorCache.resolve(
+            currentAnchor: nil,
+            clientIdentifier: "overlay-layout-smoke:second",
+            currentTime: 15
+        ) == nil,
+              anchorCache.resolve(
+                  currentAnchor: nil,
+                  clientIdentifier: firstClientIdentifier,
+                  currentTime: 16.1
+              ) == nil else {
+            fatalError("different clients and expired anchors must be rejected")
+        }
+        anchorCache.reset()
+        guard anchorCache.resolve(
+            currentAnchor: nil,
+            clientIdentifier: firstClientIdentifier,
+            currentTime: 15
+        ) == nil else {
+            fatalError("reset cache must not retain an old caret position")
+        }
     }
 
     private static func verifyVisible(_ origin: NSPoint, size: NSSize, anchor: InputOverlayAnchor) {

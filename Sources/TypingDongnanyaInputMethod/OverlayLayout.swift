@@ -6,6 +6,7 @@ struct InputOverlayAnchor {
     private static let edgeInset: CGFloat = 8
     private static let candidateGap: CGFloat = 6
     private static let translationGap: CGFloat = 5
+    private static let multilineTranslationHeight: CGFloat = 54
 
     let caretRect: NSRect
     let visibleFrame: NSRect
@@ -66,15 +67,18 @@ struct InputOverlayAnchor {
     func translationOrigin(for panelSize: NSSize, candidateFrame: NSRect?) -> NSPoint {
         var lowerEdge = caretRect.minY
         var upperEdge = caretRect.maxY
+        var adjacentLineClearance: CGFloat = 0
         if let candidateFrame {
             lowerEdge = min(lowerEdge, candidateFrame.minY)
             upperEdge = max(upperEdge, candidateFrame.maxY)
+        } else if panelSize.height > Self.multilineTranslationHeight {
+            adjacentLineClearance = max(caretRect.height, 18)
         }
 
-        let belowY = lowerEdge - Self.translationGap - panelSize.height
-        let aboveY = upperEdge + Self.translationGap
-        let belowSpace = lowerEdge - visibleFrame.minY - Self.translationGap
-        let aboveSpace = visibleFrame.maxY - upperEdge - Self.translationGap
+        let belowY = lowerEdge - adjacentLineClearance - Self.translationGap - panelSize.height
+        let aboveY = upperEdge + adjacentLineClearance + Self.translationGap
+        let belowSpace = lowerEdge - adjacentLineClearance - visibleFrame.minY - Self.translationGap
+        let aboveSpace = visibleFrame.maxY - upperEdge - adjacentLineClearance - Self.translationGap
         var originY = belowY
         if belowSpace < panelSize.height, aboveSpace > belowSpace {
             originY = aboveY
@@ -103,5 +107,40 @@ struct InputOverlayAnchor {
             && rect != .zero
             && rect.origin.x != CGFloat.greatestFiniteMagnitude
             && rect.origin.y != CGFloat.greatestFiniteMagnitude
+    }
+}
+
+// 无组合态宿主暂时不给出光标矩形时，短暂复用同一编辑客户端最近一次可信锚点。
+struct InputOverlayAnchorCache {
+    static let maximumReuseInterval = 6.0
+
+    private var clientIdentifier: String?
+    private var anchor: InputOverlayAnchor?
+    private var captureTime: TimeInterval?
+
+    mutating func resolve(
+        currentAnchor: InputOverlayAnchor?,
+        clientIdentifier: String,
+        currentTime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) -> InputOverlayAnchor? {
+        if let currentAnchor {
+            self.clientIdentifier = clientIdentifier
+            anchor = currentAnchor
+            captureTime = currentTime
+            return currentAnchor
+        }
+        guard self.clientIdentifier == clientIdentifier,
+              let anchor,
+              let captureTime,
+              currentTime - captureTime <= Self.maximumReuseInterval else {
+            return nil
+        }
+        return anchor
+    }
+
+    mutating func reset() {
+        clientIdentifier = nil
+        anchor = nil
+        captureTime = nil
     }
 }

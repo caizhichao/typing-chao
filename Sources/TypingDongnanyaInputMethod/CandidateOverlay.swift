@@ -91,30 +91,120 @@ private enum CandidateBarStyle {
     static let commentPanelHeight: CGFloat = 48
     static let maximumPanelWidth: CGFloat = 680
     static let minimumCandidateWidth: CGFloat = 44
-    static let settingsControlWidth: CGFloat = 38
     static let cornerRadius: CGFloat = 8
     static let selectedColor = NSColor(calibratedRed: 0.03, green: 0.68, blue: 0.59, alpha: 0.92)
     static let hoverColor = NSColor(calibratedWhite: 1, alpha: 0.08)
     static let borderColor = NSColor(calibratedWhite: 1, alpha: 0.16)
 }
 
+// 候选尾部把分页和设置拆成两个视觉组，并为页码、间距和分隔线保留真实宽度。
+struct CandidateBarTrailingLayout {
+    static let candidateGap: CGFloat = 8
+    static let pageIndicatorWidth: CGFloat = 18
+    static let pageButtonWidth: CGFloat = 24
+    static let pageSettingsGap: CGFloat = 8
+    static let separatorWidth: CGFloat = 1
+    static let settingsGap: CGFloat = 7
+    static let settingsButtonWidth: CGFloat = 28
+    static let trailingInset: CGFloat = 8
+
+    let pageIndicatorRect: NSRect
+    let previousPageRect: NSRect
+    let nextPageRect: NSRect
+    let separatorRect: NSRect
+    let settingsButtonRect: NSRect
+    let candidateLimitX: CGFloat
+
+    static func requiredWidth(hasPageControls: Bool) -> CGFloat {
+        var requiredWidth = candidateGap + separatorWidth + settingsGap + settingsButtonWidth + trailingInset
+        if hasPageControls {
+            requiredWidth += pageIndicatorWidth + pageButtonWidth * 2 + pageSettingsGap
+        }
+        return requiredWidth
+    }
+
+    static func resolve(panelSize: NSSize, hasPageControls: Bool) -> CandidateBarTrailingLayout {
+        let settingsButtonRect = NSRect(
+            x: panelSize.width - trailingInset - settingsButtonWidth,
+            y: (panelSize.height - settingsButtonWidth) / 2,
+            width: settingsButtonWidth,
+            height: settingsButtonWidth
+        )
+        let separatorRect = NSRect(
+            x: settingsButtonRect.minX - settingsGap - separatorWidth,
+            y: 8,
+            width: separatorWidth,
+            height: max(panelSize.height - 16, 1)
+        )
+        guard hasPageControls else {
+            return CandidateBarTrailingLayout(
+                pageIndicatorRect: .zero,
+                previousPageRect: .zero,
+                nextPageRect: .zero,
+                separatorRect: separatorRect,
+                settingsButtonRect: settingsButtonRect,
+                candidateLimitX: separatorRect.minX - candidateGap
+            )
+        }
+
+        let nextPageRect = NSRect(
+            x: separatorRect.minX - pageSettingsGap - pageButtonWidth,
+            y: 0,
+            width: pageButtonWidth,
+            height: panelSize.height
+        )
+        let previousPageRect = NSRect(
+            x: nextPageRect.minX - pageButtonWidth,
+            y: 0,
+            width: pageButtonWidth,
+            height: panelSize.height
+        )
+        let pageIndicatorRect = NSRect(
+            x: previousPageRect.minX - pageIndicatorWidth,
+            y: 0,
+            width: pageIndicatorWidth,
+            height: panelSize.height
+        )
+        return CandidateBarTrailingLayout(
+            pageIndicatorRect: pageIndicatorRect,
+            previousPageRect: previousPageRect,
+            nextPageRect: nextPageRect,
+            separatorRect: separatorRect,
+            settingsButtonRect: settingsButtonRect,
+            candidateLimitX: pageIndicatorRect.minX - candidateGap
+        )
+    }
+}
+
 private final class CandidateBarView: NSView {
+    private let settingsButton = CandidateSettingsButton()
     private var snapshot = RimeSnapshot(dictionary: [:])
     private var candidateWidthList: [CGFloat] = []
     private var maximumPanelWidth = CandidateBarStyle.maximumPanelWidth
     private var candidateRectList: [NSRect] = []
+    private var pageIndicatorRect = NSRect.zero
     private var previousPageRect = NSRect.zero
     private var nextPageRect = NSRect.zero
-    private var settingsRect = NSRect.zero
+    private var separatorRect = NSRect.zero
     private var hoveredCandidateIndex: Int?
     private var hoveredPageBackward: Bool?
-    private var settingsHovered = false
 
     var candidateSelectionHandler: ((Int) -> Void)?
     var pageHandler: ((Bool) -> Void)?
     var settingsHandler: (() -> Void)?
 
     override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        settingsButton.target = self
+        settingsButton.action = #selector(openSettings(_:))
+        addSubview(settingsButton)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
     // 将 Rime 的候选和分页状态一次写入，保证命中区域与本轮绘制完全一致。
     func update(snapshot: RimeSnapshot, maximumPanelWidth: CGFloat) -> NSSize {
@@ -156,7 +246,6 @@ private final class CandidateBarView: NSView {
         for candidateRect in candidateRectList {
             addCursorRect(candidateRect, cursor: .pointingHand)
         }
-        addCursorRect(settingsRect, cursor: .pointingHand)
         guard hasPageControls else { return }
         if snapshot.pageNumber > 0 {
             addCursorRect(previousPageRect, cursor: .pointingHand)
@@ -189,17 +278,11 @@ private final class CandidateBarView: NSView {
             hoveredPageBackward = pageBackward
             needsDisplay = true
         }
-        let nextSettingsHovered = settingsRect.contains(location)
-        if nextSettingsHovered != settingsHovered {
-            settingsHovered = nextSettingsHovered
-            needsDisplay = true
-        }
     }
 
     override func mouseExited(with event: NSEvent) {
         hoveredCandidateIndex = nil
         hoveredPageBackward = nil
-        settingsHovered = false
         needsDisplay = true
     }
 
@@ -217,9 +300,6 @@ private final class CandidateBarView: NSView {
             pageHandler?(false)
             return
         }
-        if settingsRect.contains(location) {
-            settingsHandler?()
-        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -233,7 +313,7 @@ private final class CandidateBarView: NSView {
             )
         }
         drawPageControls()
-        drawSettingsControl()
+        drawTrailingSeparator()
     }
 
     private func drawCandidate(_ candidateItem: RimeCandidateItem, index: Int, candidateRect: NSRect) {
@@ -322,13 +402,22 @@ private final class CandidateBarView: NSView {
 
     private func drawPageControls() {
         guard hasPageControls else { return }
+        let pageParagraphStyle = NSMutableParagraphStyle()
+        pageParagraphStyle.alignment = .center
         let pageAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .medium),
             .foregroundColor: NSColor(calibratedWhite: 1, alpha: 0.46),
+            .paragraphStyle: pageParagraphStyle,
         ]
         NSString(string: String(snapshot.pageNumber + 1)).draw(
-            at: NSPoint(x: previousPageRect.minX - 18, y: 13),
-            withAttributes: pageAttributes
+            with: NSRect(
+                x: pageIndicatorRect.minX,
+                y: (pageIndicatorRect.height - 14) / 2,
+                width: pageIndicatorRect.width,
+                height: 14
+            ),
+            options: [.usesLineFragmentOrigin],
+            attributes: pageAttributes
         )
         drawPageChevron(backward: true, pageRect: previousPageRect, enabled: snapshot.pageNumber > 0)
         drawPageChevron(backward: false, pageRect: nextPageRect, enabled: !snapshot.isLastPage)
@@ -352,43 +441,15 @@ private final class CandidateBarView: NSView {
             chevronText = "‹"
         }
         NSString(string: chevronText).draw(
-            at: NSPoint(x: pageRect.minX + 8, y: 9),
+            at: NSPoint(x: pageRect.minX + 7, y: (pageRect.height - 22) / 2),
             withAttributes: chevronAttributes
         )
     }
 
-    // 候选条尾部始终保留一个轻量设置入口，用户不必再猜目标语言藏在系统菜单里。
-    private func drawSettingsControl() {
-        NSColor(calibratedWhite: 1, alpha: 0.12).setFill()
-        NSRect(x: settingsRect.minX, y: 8, width: 1, height: settingsRect.height - 16).fill()
-        if settingsHovered {
-            CandidateBarStyle.hoverColor.setFill()
-            NSBezierPath(
-                roundedRect: settingsRect.insetBy(dx: 3, dy: 5),
-                xRadius: 6,
-                yRadius: 6
-            ).fill()
-        }
-        let chevronAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-            .foregroundColor: NSColor(calibratedWhite: 1, alpha: 0.62),
-        ]
-        var settingsAlpha = CGFloat(0.72)
-        if settingsHovered {
-            settingsAlpha = 0.92
-        }
-        let settingsAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-            .foregroundColor: NSColor(calibratedWhite: 1, alpha: settingsAlpha),
-        ]
-        NSString(string: "⌄").draw(
-            at: NSPoint(x: settingsRect.minX + 7, y: 11),
-            withAttributes: chevronAttributes
-        )
-        NSString(string: "⚙︎").draw(
-            at: NSPoint(x: settingsRect.minX + 20, y: 12),
-            withAttributes: settingsAttributes
-        )
+    private func drawTrailingSeparator() {
+        guard !separatorRect.isEmpty else { return }
+        NSColor(calibratedWhite: 1, alpha: 0.14).setFill()
+        NSBezierPath(rect: separatorRect).fill()
     }
 
     private var hasPageControls: Bool {
@@ -398,10 +459,14 @@ private final class CandidateBarView: NSView {
     // 候选条仅保留必要的点击宽度和内容边距，单候选时不再预留宽大的空白面板。
     private func calculateSize() -> NSSize {
         let candidateWidth = candidateWidthList.reduce(CGFloat.zero, +)
-        let controlWidth = pageControlWidth + CandidateBarStyle.settingsControlWidth
         let minimumPanelWidth = min(122, maximumPanelWidth)
         let panelWidth = min(
-            max(candidateWidth + 20 + controlWidth, minimumPanelWidth),
+            max(
+                candidateWidth + 10 + CandidateBarTrailingLayout.requiredWidth(
+                    hasPageControls: hasPageControls
+                ),
+                minimumPanelWidth
+            ),
             maximumPanelWidth
         )
         var panelHeight = CandidateBarStyle.compactPanelHeight
@@ -414,14 +479,16 @@ private final class CandidateBarView: NSView {
     private func calculateHitAreas(panelSize: NSSize) {
         candidateRectList = []
         var currentX: CGFloat = 10
-        settingsRect = NSRect(
-            x: panelSize.width - CandidateBarStyle.settingsControlWidth,
-            y: 0,
-            width: CandidateBarStyle.settingsControlWidth,
-            height: panelSize.height
+        let trailingLayout = CandidateBarTrailingLayout.resolve(
+            panelSize: panelSize,
+            hasPageControls: hasPageControls
         )
-        let trailingInset = 10 + pageControlWidth + CandidateBarStyle.settingsControlWidth
-        let candidateLimitX = panelSize.width - trailingInset
+        pageIndicatorRect = trailingLayout.pageIndicatorRect
+        previousPageRect = trailingLayout.previousPageRect
+        nextPageRect = trailingLayout.nextPageRect
+        separatorRect = trailingLayout.separatorRect
+        settingsButton.frame = trailingLayout.settingsButtonRect
+        let candidateLimitX = trailingLayout.candidateLimitX
         for (candidateIndex, _) in snapshot.candidateList.enumerated() {
             guard candidateIndex < candidateWidthList.count else { break }
             let candidateWidth = min(
@@ -433,19 +500,11 @@ private final class CandidateBarView: NSView {
             currentX += candidateWidth
         }
         guard hasPageControls else {
+            pageIndicatorRect = .zero
             previousPageRect = .zero
             nextPageRect = .zero
             return
         }
-        previousPageRect = NSRect(x: settingsRect.minX - 52, y: 0, width: 26, height: panelSize.height)
-        nextPageRect = NSRect(x: settingsRect.minX - 26, y: 0, width: 26, height: panelSize.height)
-    }
-
-    private var pageControlWidth: CGFloat {
-        if hasPageControls {
-            return 52
-        }
-        return 0
     }
 
     // 宽度不足时按候选的理想宽度分配剩余空间，优先保证本页候选不被静默隐藏。
@@ -453,7 +512,9 @@ private final class CandidateBarView: NSView {
         let idealWidthList = snapshot.candidateList.map { width(for: $0) }
         guard !idealWidthList.isEmpty else { return [] }
         let availableCandidateWidth = max(
-            maximumPanelWidth - 20 - pageControlWidth - CandidateBarStyle.settingsControlWidth,
+            maximumPanelWidth - 10 - CandidateBarTrailingLayout.requiredWidth(
+                hasPageControls: hasPageControls
+            ),
             1
         )
         let idealWidth = idealWidthList.reduce(CGFloat.zero, +)
@@ -488,5 +549,68 @@ private final class CandidateBarView: NSView {
         let textWidth = NSString(string: candidateItem.textValue).size(withAttributes: textAttributes).width
         let commentWidth = NSString(string: candidateItem.commentText).size(withAttributes: commentAttributes).width
         return min(max(max(textWidth, commentWidth) + 42, 64), 132)
+    }
+
+    @objc private func openSettings(_ sender: NSButton) {
+        settingsHandler?()
+    }
+}
+
+// 使用真实按钮承载候选条唯一设置入口，保证点击、辅助功能标签和悬停反馈不依赖手写命中区。
+private final class CandidateSettingsButton: NSButton {
+    private var hoverTrackingArea: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isBordered = false
+        imagePosition = .imageOnly
+        imageScaling = .scaleProportionallyDown
+        image = NSImage(
+            systemSymbolName: "gearshape",
+            accessibilityDescription: "打开 Typing 东南亚设置"
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        )
+        contentTintColor = NSColor(calibratedWhite: 1, alpha: 0.76)
+        toolTip = "打开设置"
+        wantsLayer = true
+        layer?.cornerRadius = 6
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+        }
+        let trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        hoverTrackingArea = trackingArea
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        layer?.backgroundColor = CandidateBarStyle.hoverColor.cgColor
+        contentTintColor = .white
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        layer?.backgroundColor = NSColor.clear.cgColor
+        contentTintColor = NSColor(calibratedWhite: 1, alpha: 0.76)
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
     }
 }

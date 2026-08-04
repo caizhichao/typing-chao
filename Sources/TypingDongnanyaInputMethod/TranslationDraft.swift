@@ -1,87 +1,85 @@
 import Foundation
-import InputMethodKit
 
-// 固定一次翻译请求的原文、客户端和可验证替换范围，避免异步结果读取后续可变状态。
-struct TranslationSourceSnapshot {
-    let sourceText: String
-    let replacementRange: NSRange?
-    let clientIdentifier: ObjectIdentifier
-    let replacementVerified: Bool
-
-    var canReplaceSource: Bool {
-        replacementRange != nil && replacementVerified
-    }
+// 翻译草稿来源只区分输入法逐段确认文本和用户明确导入的剪贴板文本。
+enum TranslationSourceKind {
+    case inputMethodDraft
+    case clipboardDraft
 }
 
-// 维护当前输入会话的稳定文本，并优先从客户端光标前重建完整当前句。
-struct TranslationDraftState {
-    private var sourceText = ""
-    private var replacementRange: NSRange?
-    private var clientIdentifier: ObjectIdentifier?
-    private var replacementVerified = false
-    private var sourceExceededCharacterLimit = false
+// 固定一次翻译请求的完整草稿、稳定输入会话和来源，异步回写必须精确匹配。
+struct TranslationSourceSnapshot: Equatable {
+    let sourceText: String
+    let clientIdentifier: String
+    let sourceKind: TranslationSourceKind
+}
 
-    // 新提交文本先进入会话缓冲，客户端可读时直接升级为光标前完整当前句。
-    mutating func appendCommittedText(_ committedText: String, client: IMKTextInput) -> TranslationSourceSnapshot? {
-        let currentClientIdentifier = ObjectIdentifier(client as AnyObject)
+// 草稿由输入法持有并通过 marked text 展示，确认译文或原文后才一次性提交宿主。
+struct TranslationDraftState {
+    private(set) var textValue = ""
+    private var clientIdentifier: String?
+    private var sourceKind = TranslationSourceKind.inputMethodDraft
+
+    var hasText: Bool {
+        !textValue.isEmpty
+    }
+
+    var exceedsCharacterLimit: Bool {
+        textValue.count > TranslationPolicy.maxSourceCharacters
+    }
+
+    // Rime 已确认文本和确定的直通字符都只追加到内部草稿，不提前写入宿主正文。
+    mutating func appendConfirmedText(
+        _ confirmedText: String,
+        clientIdentifier currentClientIdentifier: String
+    ) -> TranslationSourceSnapshot? {
+        if sourceKind != .inputMethodDraft {
+            reset()
+        }
         if let clientIdentifier, clientIdentifier != currentClientIdentifier {
             reset()
         }
         clientIdentifier = currentClientIdentifier
+        sourceKind = .inputMethodDraft
+        textValue += confirmedText
+        return normalizedSnapshot()
+    }
 
-        let previousText = sourceText
-        let fullAppendedText = previousText + committedText
-        let appendedText = Self.clippedSourceText(fullAppendedText)
-        if fullAppendedText.count > TranslationPolicy.maxSourceCharacters {
-            sourceExceededCharacterLimit = true
-        }
-        if let documentSnapshot = Self.currentSentenceSnapshot(
-            client: client,
-            clientIdentifier: currentClientIdentifier
-        ), documentSnapshot.sourceText.hasSuffix(committedText) {
-            sourceText = documentSnapshot.sourceText
-            replacementRange = documentSnapshot.replacementRange
-            replacementVerified = true
-            sourceExceededCharacterLimit = false
+    // 用户明确触发剪贴板翻译时，剪贴板正文直接成为新的输入法内部草稿。
+    mutating func synchronizeClipboardText(
+        _ clipboardText: String,
+        clientIdentifier currentClientIdentifier: String
+    ) -> TranslationSourceSnapshot? {
+        textValue = clipboardText
+        clientIdentifier = currentClientIdentifier
+        sourceKind = .clipboardDraft
+        return normalizedSnapshot()
+    }
+
+    // 空组合态退格只编辑输入法内部草稿，按扩展字素删除避免拆坏 Emoji 或组合字符。
+    mutating func removeLastCharacter(
+        clientIdentifier currentClientIdentifier: String
+    ) -> TranslationSourceSnapshot? {
+        guard clientIdentifier == currentClientIdentifier, !textValue.isEmpty else {
             return normalizedSnapshot()
         }
-
-        let selectedRange = client.selectedRange()
-        let committedLength = committedText.utf16.count
-        let insertedRange = Self.insertedRange(
-            selectedRange: selectedRange,
-            committedLength: committedLength
-        )
-        if previousText.isEmpty {
-            replacementRange = insertedRange
-        } else if let replacementRange,
-                  let insertedRange,
-                  insertedRange.location == NSMaxRange(replacementRange) {
-            self.replacementRange = NSRange(
-                location: replacementRange.location,
-                length: replacementRange.length + insertedRange.length
-            )
-        } else {
-            replacementRange = nil
-        }
-        replacementVerified = false
-        sourceText = appendedText
-        if sourceExceededCharacterLimit {
-            replacementRange = nil
+        textValue.removeLast()
+        if textValue.isEmpty {
+            reset()
+            return nil
         }
         return normalizedSnapshot()
     }
 
-    // 请求真正开始前重新读取光标前完整当前句，不能再退回最后一次提交片段。
-    func resolvedSnapshot(client: IMKTextInput, fallbackSnapshot: TranslationSourceSnapshot) -> TranslationSourceSnapshot {
-        let currentClientIdentifier = ObjectIdentifier(client as AnyObject)
-        guard currentClientIdentifier == fallbackSnapshot.clientIdentifier else {
-            return fallbackSnapshot
+    // 请求开始与返回都要求当前草稿和调度快照完全一致，拒绝旧译文覆盖后续输入。
+    func resolvedSnapshot(
+        clientIdentifier currentClientIdentifier: String,
+        fallbackSnapshot: TranslationSourceSnapshot
+    ) -> TranslationSourceSnapshot? {
+        guard currentClientIdentifier == fallbackSnapshot.clientIdentifier,
+              normalizedSnapshot() == fallbackSnapshot else {
+            return nil
         }
-        return Self.currentSentenceSnapshot(
-            client: client,
-            clientIdentifier: currentClientIdentifier
-        ) ?? fallbackSnapshot
+        return fallbackSnapshot
     }
 
     func currentSnapshot() -> TranslationSourceSnapshot? {
@@ -89,134 +87,99 @@ struct TranslationDraftState {
     }
 
     mutating func reset() {
-        sourceText = ""
-        replacementRange = nil
+        textValue = ""
         clientIdentifier = nil
-        replacementVerified = false
-        sourceExceededCharacterLimit = false
+        sourceKind = .inputMethodDraft
     }
 
-    // 句末请求已经保存独立快照后只清空下一句缓冲，不影响正在返回的译文。
-    mutating func startNextSentence() {
-        sourceText = ""
-        replacementRange = nil
-        replacementVerified = false
-        sourceExceededCharacterLimit = false
+    // 整段至少包含文字或数字时才生成请求快照，纯符号仍保留在可编辑草稿中。
+    private static func containsTranslatableContent(_ textValue: String) -> Bool {
+        textValue.unicodeScalars.contains { scalarValue in
+            CharacterSet.letters.contains(scalarValue) ||
+                CharacterSet.decimalDigits.contains(scalarValue)
+        }
     }
 
     private func normalizedSnapshot() -> TranslationSourceSnapshot? {
-        guard let clientIdentifier, !sourceExceededCharacterLimit else { return nil }
-        let normalizedText = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedText.isEmpty else { return nil }
-
-        var normalizedRange = replacementRange
-        if normalizedText != sourceText, let replacementRange {
-            let localRange = (sourceText as NSString).range(of: normalizedText)
-            if localRange.location != NSNotFound {
-                normalizedRange = NSRange(
-                    location: replacementRange.location + localRange.location,
-                    length: localRange.length
-                )
-            } else {
-                normalizedRange = nil
-            }
+        guard let clientIdentifier, !exceedsCharacterLimit else { return nil }
+        let normalizedText = textValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedText.isEmpty,
+              Self.containsTranslatableContent(normalizedText) else {
+            return nil
         }
         return TranslationSourceSnapshot(
             sourceText: normalizedText,
-            replacementRange: normalizedRange,
             clientIdentifier: clientIdentifier,
-            replacementVerified: replacementVerified
-        )
-    }
-
-    private static func clippedSourceText(_ textValue: String) -> String {
-        guard textValue.count > TranslationPolicy.maxSourceCharacters else {
-            return textValue
-        }
-        return String(textValue.suffix(TranslationPolicy.maxSourceCharacters))
-    }
-
-    private static func insertedRange(selectedRange: NSRange, committedLength: Int) -> NSRange? {
-        guard selectedRange.location != NSNotFound,
-              selectedRange.length == 0,
-              selectedRange.location >= committedLength else {
-            return nil
-        }
-        return NSRange(
-            location: selectedRange.location - committedLength,
-            length: committedLength
-        )
-    }
-
-    // 从光标向前读取当前行，并以最近的句末标点或换行作为整句起点。
-    private static func currentSentenceSnapshot(
-        client: IMKTextInput,
-        clientIdentifier: ObjectIdentifier
-    ) -> TranslationSourceSnapshot? {
-        let selectedRange = client.selectedRange()
-        guard selectedRange.location != NSNotFound,
-              selectedRange.length == 0,
-              selectedRange.location > 0 else {
-            return nil
-        }
-
-        let readLength = min(selectedRange.location, TranslationPolicy.maxSourceCharacters)
-        let readRange = NSRange(
-            location: selectedRange.location - readLength,
-            length: readLength
-        )
-        guard let documentText = client.attributedSubstring(from: readRange)?.string else {
-            return nil
-        }
-
-        let documentNSString = documentText as NSString
-        guard let sentenceRange = TranslationSentenceBoundary.currentSentenceRange(in: documentText) else {
-            return nil
-        }
-        if readRange.location > 0, sentenceRange.location == 0 {
-            return nil
-        }
-        let sentenceText = documentNSString.substring(with: sentenceRange)
-        let documentStartLocation = selectedRange.location - documentNSString.length
-        return TranslationSourceSnapshot(
-            sourceText: sentenceText,
-            replacementRange: NSRange(
-                location: documentStartLocation + sentenceRange.location,
-                length: sentenceRange.length
-            ),
-            clientIdentifier: clientIdentifier,
-            replacementVerified: true
+            sourceKind: sourceKind
         )
     }
 }
 
-// 当前翻译触发策略只在输入控制器和草稿状态之间共享，不引入运行时模式开关。
+// 当前翻译触发策略只在输入控制器和草稿状态之间共享，不引入第二套运行时状态。
 enum TranslationPolicy {
     static let stableInputDelayMilliseconds = 1_000
-    static let userInitiatedDelayMilliseconds = 180
+    static let userInitiatedDelayMilliseconds = 0
     static let maxSourceCharacters = 600
-    static let sentenceBoundaryCharacters = CharacterSet(charactersIn: "。！？!?；;")
-    private static let draftPreservingUnhandledKeyNameList = [" ", "space"]
+    private static let spaceKeyName = "space"
+    private static let spaceText = " "
+    private static let invalidatingCommandKeyNameList = ["x", "z", "k"]
+    private static let hostEditingKeyNameList = ["BackSpace", "Delete", "Return"]
 
-    // 普通空格由宿主直接插入时只重算稳定期，不能清空上一笔已经提交的整句草稿。
-    static func preservesDraftForUnhandledKey(_ keyName: String) -> Bool {
-        draftPreservingUnhandledKeyNameList.contains(keyName)
+    // IMK 可能把回车和删除作为控制文本回调，必须先还原为 librime 命名键。
+    static func rimeKeyName(for textValue: String) -> String? {
+        if textValue == "\r" || textValue == "\n" {
+            return "Return"
+        }
+        if textValue == "\u{8}" || textValue == "\u{7f}" {
+            return "BackSpace"
+        }
+        if textValue == "\u{f728}" {
+            return "Delete"
+        }
+        guard textValue.utf8.count == 1,
+              let scalarValue = textValue.unicodeScalars.first?.value,
+              scalarValue >= 0x20,
+              scalarValue <= 0x7e else {
+            return nil
+        }
+        return textValue
     }
 
-    // 自动请求发现稳定期内文档原文已变化时必须重新计满一秒，手动请求直接使用当前快照。
-    static func shouldRestartStableDelay(
-        scheduledSourceText: String,
-        resolvedSourceText: String,
-        userInitiated: Bool
-    ) -> Bool {
-        guard !userInitiated else { return false }
-        return scheduledSourceText != resolvedSourceText
+    // 已知的单个 ASCII 文本可直接进入输入法草稿，导航键和未知动作不做猜测。
+    static func passThroughText(for keyName: String) -> String? {
+        if keyName == spaceKeyName {
+            return spaceText
+        }
+        guard keyName.utf8.count == 1,
+              let scalarValue = keyName.unicodeScalars.first?.value,
+              scalarValue >= 0x20,
+              scalarValue <= 0x7e else {
+            return nil
+        }
+        return keyName
+    }
+
+    // 只有宿主实际转发给输入法的 Command-V 才读取剪贴板，不注册全局按键监听。
+    static func commandRequestsClipboardTranslation(_ keyName: String) -> Bool {
+        keyName.lowercased() == "v"
+    }
+
+    // 剪切、撤销和重做先结束当前 marked draft，再把命令交还宿主。
+    static func commandInvalidatesTranslationDraft(_ keyName: String) -> Bool {
+        invalidatingCommandKeyNameList.contains(keyName.lowercased())
+    }
+
+    // Control 快捷键默认交还宿主，只有项目明确绑定的 Control+Period 继续交给 librime。
+    static func controlShortcutUsesRime(_ keyName: String) -> Bool {
+        keyName == "." || keyName.lowercased() == "period"
+    }
+
+    // 没有内部草稿时，空组合态删除与回车仍属于宿主编辑动作。
+    static func shouldPassThroughHostEditingKey(keyName: String, isComposing: Bool) -> Bool {
+        !isComposing && hostEditingKeyNameList.contains(keyName)
     }
 
     static func allowsRemoteTranslation(isTranslationEnabled: Bool, isSecureInputActive: Bool) -> Bool {
-        guard isTranslationEnabled, !isSecureInputActive else {
-            return false
-        }
-        return true
+        isTranslationEnabled && !isSecureInputActive
     }
 }

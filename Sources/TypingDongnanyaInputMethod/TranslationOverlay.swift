@@ -1,13 +1,27 @@
 import AppKit
 
-// 只负责显示简短译文状态和安全替换动作，不参与网络请求生命周期。
+// 译文展示框只发出两个明确确认动作，不读取宿主正文或参与网络生命周期。
+enum TranslationOverlayAction {
+    case useTranslation
+    case commitOriginal
+}
+
+// 统一翻译模式的等待、请求、结果和错误视觉状态。
+enum TranslationOverlayPresentation {
+    case waiting
+    case loading
+    case translation
+    case error
+}
+
+// 只负责显示翻译模式状态和显式确认按钮，不再提供追溯替换入口。
 final class TranslationOverlay {
-    private let panel: NSPanel
+    private let panel: TranslationOverlayPanel
     private let visualEffectView: NSVisualEffectView
     private let contentView: TranslationCardView
 
     init() {
-        let initialFrame = NSRect(x: 0, y: 0, width: 260, height: 36)
+        let initialFrame = NSRect(x: 0, y: 0, width: 280, height: 60)
         contentView = TranslationCardView(frame: initialFrame)
         contentView.autoresizingMask = [.width, .height]
 
@@ -15,39 +29,78 @@ final class TranslationOverlay {
         visualEffectView.material = .hudWindow
         visualEffectView.blendingMode = .behindWindow
         visualEffectView.state = .active
+        visualEffectView.appearance = NSAppearance(named: .darkAqua)
         visualEffectView.wantsLayer = true
         visualEffectView.layer?.cornerRadius = TranslationCardStyle.cornerRadius
         visualEffectView.layer?.masksToBounds = true
+        visualEffectView.layer?.backgroundColor = TranslationCardStyle.backgroundColor.cgColor
         visualEffectView.layer?.borderWidth = 1
         visualEffectView.layer?.borderColor = TranslationCardStyle.borderColor.cgColor
         visualEffectView.addSubview(contentView)
 
-        panel = NSPanel(
+        panel = TranslationOverlayPanel(
             contentRect: initialFrame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: true
         )
         panel.level = .popUpMenu
+        panel.appearance = NSAppearance(named: .darkAqua)
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
-        panel.ignoresMouseEvents = false
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.acceptsMouseMovedEvents = true
         panel.animationBehavior = .none
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentView = visualEffectView
+        panel.mouseEventHandler = { [weak contentView] event in
+            contentView?.handlePanelMouseEvent(event) ?? false
+        }
     }
 
-    // 译文确认行为由输入控制器处理，浮层只在可替换状态转发按钮点击。
-    func setTranslationSelectionHandler(_ selectionHandler: @escaping () -> Void) {
-        contentView.selectionHandler = selectionHandler
+    // 两个确认动作统一回到输入控制器结束 marked draft 事务。
+    func setActionHandler(_ actionHandler: @escaping (TranslationOverlayAction) -> Void) {
+        contentView.actionHandler = actionHandler
+    }
+
+    func showWaiting(
+        languagePair: String,
+        anchor: InputOverlayAnchor,
+        candidateFrame: NSRect?
+    ) {
+        show(
+            content: TranslationCardContent(
+                languagePair: languagePair,
+                bodyText: "继续输入，停顿 1 秒后翻译",
+                presentation: .waiting
+            ),
+            anchor: anchor,
+            candidateFrame: candidateFrame
+        )
+    }
+
+    func showLoading(
+        languagePair: String,
+        anchor: InputOverlayAnchor,
+        candidateFrame: NSRect?
+    ) {
+        show(
+            content: TranslationCardContent(
+                languagePair: languagePair,
+                bodyText: "正在翻译…",
+                presentation: .loading
+            ),
+            anchor: anchor,
+            candidateFrame: candidateFrame
+        )
     }
 
     func showTranslation(
         translatedText: String,
         languagePair: String,
-        replacementEnabled: Bool,
         anchor: InputOverlayAnchor,
         candidateFrame: NSRect?
     ) {
@@ -59,26 +112,7 @@ final class TranslationOverlay {
             content: TranslationCardContent(
                 languagePair: languagePair,
                 bodyText: translatedText,
-                presentation: .translation,
-                replacementEnabled: replacementEnabled
-            ),
-            anchor: anchor,
-            candidateFrame: candidateFrame
-        )
-    }
-
-    func showStale(
-        translatedText: String,
-        languagePair: String,
-        anchor: InputOverlayAnchor,
-        candidateFrame: NSRect?
-    ) {
-        show(
-            content: TranslationCardContent(
-                languagePair: languagePair,
-                bodyText: translatedText,
-                presentation: .stale,
-                replacementEnabled: false
+                presentation: .translation
             ),
             anchor: anchor,
             candidateFrame: candidateFrame
@@ -95,8 +129,7 @@ final class TranslationOverlay {
             content: TranslationCardContent(
                 languagePair: languagePair,
                 bodyText: message,
-                presentation: .error,
-                replacementEnabled: false
+                presentation: .error
             ),
             anchor: anchor,
             candidateFrame: candidateFrame
@@ -108,12 +141,21 @@ final class TranslationOverlay {
         panel.orderOut(nil)
     }
 
-    // 候选条每次随光标变化时只更新译文卡位置，避免重新创建浮层造成跳动。
-    func updatePosition(anchor: InputOverlayAnchor, candidateFrame: NSRect?) {
-        guard panel.isVisible else { return }
-        panel.setFrameOrigin(anchor.translationOrigin(for: panel.frame.size, candidateFrame: candidateFrame))
+    var visibleFrame: NSRect? {
+        panel.isVisible ? panel.frame : nil
     }
 
+    func updatePosition(anchor: InputOverlayAnchor, candidateFrame: NSRect?) {
+        guard panel.isVisible else { return }
+        panel.setFrameOrigin(
+            anchor.translationOrigin(
+                for: panel.frame.size,
+                candidateFrame: candidateFrame
+            )
+        )
+    }
+
+    // 四种状态共用同一层与同一左边缘，只有结果态开放两个按钮的鼠标事件。
     private func show(
         content: TranslationCardContent,
         anchor: InputOverlayAnchor,
@@ -123,71 +165,172 @@ final class TranslationOverlay {
             content: content,
             maximumPanelWidth: anchor.availableOverlayWidth
         )
-        panel.ignoresMouseEvents = !content.replacementEnabled
         visualEffectView.frame = NSRect(origin: .zero, size: panelSize)
         contentView.frame = visualEffectView.bounds
         panel.setContentSize(panelSize)
         panel.setFrameOrigin(anchor.translationOrigin(for: panelSize, candidateFrame: candidateFrame))
+        panel.ignoresMouseEvents = content.presentation != .translation
         panel.orderFrontRegardless()
     }
 }
 
-// 汇总译文浮层一次绘制所需数据，避免加载、结果和失效状态各自拼装字段。
+// 非激活输入法浮窗在窗口层转发鼠标，避免宿主焦点不变时按钮收不到点击。
+final class TranslationOverlayPanel: NSPanel {
+    var mouseEventHandler: ((NSEvent) -> Bool)?
+
+    override func sendEvent(_ event: NSEvent) {
+        if mouseEventHandler?(event) == true {
+            return
+        }
+        super.sendEvent(event)
+    }
+}
+
+// 汇总翻译展示框一次绘制所需数据，等待和结果状态不再分别拼装布局。
 private struct TranslationCardContent {
     let languagePair: String
     let bodyText: String
-    let presentation: TranslationPresentation
-    let replacementEnabled: Bool
-}
-
-private enum TranslationPresentation {
-    case translation
-    case stale
-    case error
+    let presentation: TranslationOverlayPresentation
 }
 
 private enum TranslationCardStyle {
-    static let maximumPanelWidth: CGFloat = 960
-    static let maximumTranslationBodyHeight: CGFloat = 76
-    static let cornerRadius: CGFloat = 9
-    static let borderColor = NSColor(calibratedWhite: 1, alpha: 0.15)
+    static let cornerRadius: CGFloat = 10
+    static let backgroundColor = NSColor(calibratedWhite: 0.055, alpha: 0.74)
+    static let borderColor = NSColor(calibratedWhite: 1, alpha: 0.14)
     static let accentColor = NSColor(calibratedRed: 0.03, green: 0.68, blue: 0.59, alpha: 1)
+    static let secondaryFillColor = NSColor(calibratedWhite: 1, alpha: 0.055)
+}
+
+// 结果态按钮使用固定高度，正文只在有限宽度档位内换行，避免卡片抖成横向长条。
+struct TranslationCardLayout {
+    static let maximumPanelWidth: CGFloat = 420
+    static let maximumBodyHeight: CGFloat = 92
+    static let compactPanelHeight: CGFloat = 60
+    static let maximumTranslationPanelHeight: CGFloat = 158
+    static let horizontalInset: CGFloat = 12
+    static let headerHeight: CGFloat = 28
+    static let actionHeight: CGFloat = 28
+    static let actionBottomInset: CGFloat = 10
+    static let actionGap: CGFloat = 8
+
+    static func resolvedSize(
+        bodyText: String,
+        presentation: TranslationOverlayPresentation,
+        availableWidth: CGFloat
+    ) -> NSSize {
+        let maximumWidth = min(max(availableWidth, 1), maximumPanelWidth)
+        let bodyAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .regular),
+        ]
+        let minimumWidth = min(presentation == .translation ? 280 : 240, maximumWidth)
+        let naturalBodyWidth = NSString(string: bodyText).size(withAttributes: bodyAttributes).width
+        let preferredWidth = min(
+            max(naturalBodyWidth + horizontalInset * 2, minimumWidth),
+            maximumWidth
+        )
+        let panelWidth = stablePanelWidth(
+            preferredWidth: preferredWidth,
+            minimumWidth: minimumWidth,
+            maximumWidth: maximumWidth
+        )
+        guard presentation == .translation else {
+            let bodyRect = NSString(string: bodyText).boundingRect(
+                with: NSSize(width: max(panelWidth - horizontalInset * 2, 1), height: 44),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: bodyAttributes
+            )
+            return NSSize(
+                width: panelWidth,
+                height: max(compactPanelHeight, ceil(bodyRect.height) + headerHeight + 12)
+            )
+        }
+
+        let bodyRect = NSString(string: bodyText).boundingRect(
+            with: NSSize(
+                width: max(panelWidth - horizontalInset * 2, 1),
+                height: maximumBodyHeight
+            ),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: bodyAttributes
+        )
+        let panelHeight = min(
+            headerHeight + ceil(bodyRect.height) + 12 + actionHeight + actionBottomInset,
+            maximumTranslationPanelHeight
+        )
+        return NSSize(width: panelWidth, height: max(panelHeight, 92))
+    }
+
+    private static func stablePanelWidth(
+        preferredWidth: CGFloat,
+        minimumWidth: CGFloat,
+        maximumWidth: CGFloat
+    ) -> CGFloat {
+        for widthTier in [240, 280, 340, maximumPanelWidth] as [CGFloat] {
+            let resolvedWidth = min(widthTier, maximumWidth)
+            if resolvedWidth >= preferredWidth, resolvedWidth >= minimumWidth {
+                return resolvedWidth
+            }
+        }
+        return maximumWidth
+    }
+}
+
+// 两个确认按钮共享同一排版入口，绘制和点击命中始终使用同一矩形。
+struct TranslationActionLayout {
+    let primaryRect: NSRect
+    let secondaryRect: NSRect
+
+    static func resolve(panelSize: NSSize) -> TranslationActionLayout {
+        let availableWidth = panelSize.width - TranslationCardLayout.horizontalInset * 2
+        let buttonWidth = max(
+            (availableWidth - TranslationCardLayout.actionGap) / 2,
+            1
+        )
+        let buttonY = panelSize.height - TranslationCardLayout.actionBottomInset - TranslationCardLayout.actionHeight
+        return TranslationActionLayout(
+            primaryRect: NSRect(
+                x: TranslationCardLayout.horizontalInset,
+                y: buttonY,
+                width: buttonWidth,
+                height: TranslationCardLayout.actionHeight
+            ),
+            secondaryRect: NSRect(
+                x: TranslationCardLayout.horizontalInset + buttonWidth + TranslationCardLayout.actionGap,
+                y: buttonY,
+                width: buttonWidth,
+                height: TranslationCardLayout.actionHeight
+            )
+        )
+    }
 }
 
 private final class TranslationCardView: NSView {
     private var content = TranslationCardContent(
-        languagePair: "中 → 英",
-        bodyText: "",
-        presentation: .translation,
-        replacementEnabled: false
+        languagePair: "简体中文 → 英语",
+        bodyText: "继续输入，停顿 1 秒后翻译",
+        presentation: .waiting
     )
-    private var actionRect = NSRect.zero
-    private var actionHovered = false
-    private var actionPressed = false
-    private var maximumPanelWidth = TranslationCardStyle.maximumPanelWidth
-    var selectionHandler: (() -> Void)?
+    private var actionLayout = TranslationActionLayout.resolve(
+        panelSize: NSSize(width: 280, height: 92)
+    )
+    private var hoveredAction: TranslationOverlayAction?
+    private var pressedAction: TranslationOverlayAction?
+    private var maximumPanelWidth = TranslationCardLayout.maximumPanelWidth
+    var actionHandler: ((TranslationOverlayAction) -> Void)?
 
     override var isFlipped: Bool { true }
 
-    // 译文卡只按译文正文决定尺寸，不再重复显示用户刚输入的原文。
+    // 每次状态变化只重算当前内容尺寸，等待与加载态保持同一紧凑高度。
     func update(content: TranslationCardContent, maximumPanelWidth: CGFloat) -> NSSize {
         self.content = content
         self.maximumPanelWidth = min(
             max(maximumPanelWidth, 1),
-            TranslationCardStyle.maximumPanelWidth
+            TranslationCardLayout.maximumPanelWidth
         )
-        actionHovered = false
-        actionPressed = false
+        hoveredAction = nil
+        pressedAction = nil
         let panelSize = calculateSize()
-        actionRect = .zero
-        if content.replacementEnabled {
-            actionRect = NSRect(
-                x: panelSize.width - 68,
-                y: (panelSize.height - 20) / 2,
-                width: 56,
-                height: 20
-            )
-        }
+        actionLayout = TranslationActionLayout.resolve(panelSize: panelSize)
         window?.invalidateCursorRects(for: self)
         needsDisplay = true
         return panelSize
@@ -208,80 +351,86 @@ private final class TranslationCardView: NSView {
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        if content.replacementEnabled {
-            addCursorRect(bounds, cursor: .pointingHand)
-        }
+        guard content.presentation == .translation else { return }
+        addCursorRect(actionLayout.primaryRect, cursor: .pointingHand)
+        addCursorRect(actionLayout.secondaryRect, cursor: .pointingHand)
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
     }
 
-    // 整张验证通过的译文卡都是替换入口，hover 反馈必须与实际点击范围一致。
-    override func mouseMoved(with event: NSEvent) {
-        guard content.replacementEnabled else { return }
+    // 非激活 panel 的窗口事件按按钮矩形路由，拖出按钮后抬起不会误确认。
+    func handlePanelMouseEvent(_ event: NSEvent) -> Bool {
+        guard content.presentation == .translation else { return false }
         let location = convert(event.locationInWindow, from: nil)
-        let nextHovered = bounds.contains(location)
-        if nextHovered != actionHovered {
-            actionHovered = nextHovered
+        switch event.type {
+        case .mouseMoved:
+            let nextAction = action(at: location)
+            if nextAction != hoveredAction {
+                hoveredAction = nextAction
+                needsDisplay = true
+            }
+            return nextAction != nil
+        case .leftMouseDown:
+            guard let nextAction = action(at: location) else { return false }
+            pressedAction = nextAction
+            hoveredAction = nextAction
             needsDisplay = true
-        }
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        actionHovered = false
-        needsDisplay = true
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        guard content.replacementEnabled else { return }
-        let location = convert(event.locationInWindow, from: nil)
-        guard bounds.contains(location) else { return }
-        actionPressed = true
-        actionHovered = true
-        needsDisplay = true
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard actionPressed else { return }
-        let location = convert(event.locationInWindow, from: nil)
-        let nextHovered = bounds.contains(location)
-        if nextHovered != actionHovered {
-            actionHovered = nextHovered
+            return true
+        case .leftMouseDragged:
+            guard pressedAction != nil else { return false }
+            hoveredAction = action(at: location)
             needsDisplay = true
-        }
-    }
-
-    // 替换动作在鼠标抬起且仍位于卡片内时提交，拖出卡片可取消误触。
-    override func mouseUp(with event: NSEvent) {
-        guard actionPressed else { return }
-        let location = convert(event.locationInWindow, from: nil)
-        let shouldReplace = bounds.contains(location)
-        actionPressed = false
-        actionHovered = shouldReplace
-        needsDisplay = true
-        if shouldReplace {
-            selectionHandler?()
+            return true
+        case .leftMouseUp:
+            guard let pressedAction else { return false }
+            let releasedAction = action(at: location)
+            self.pressedAction = nil
+            hoveredAction = releasedAction
+            needsDisplay = true
+            if releasedAction == pressedAction {
+                actionHandler?(pressedAction)
+            }
+            return true
+        default:
+            return false
         }
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        drawInteractionState()
-        if content.presentation != .translation {
-            drawStatusHeader()
+        drawBackground()
+        drawHeader()
+        drawBody()
+        if content.presentation == .translation {
+            drawAction(
+                titleText: "使用译文",
+                actionName: .useTranslation,
+                actionRect: actionLayout.primaryRect,
+                isPrimary: true
+            )
+            drawAction(
+                titleText: "上屏原文",
+                actionName: .commitOriginal,
+                actionRect: actionLayout.secondaryRect,
+                isPrimary: false
+            )
         }
-        drawBodyText()
-        drawAction()
     }
 
-    private func drawInteractionState() {
-        guard content.replacementEnabled, actionHovered else { return }
-        var interactionColor = NSColor(calibratedWhite: 1, alpha: 0.035)
-        if actionPressed {
-            interactionColor = TranslationCardStyle.accentColor.withAlphaComponent(0.08)
+    private func action(at location: NSPoint) -> TranslationOverlayAction? {
+        if actionLayout.primaryRect.contains(location) {
+            return .useTranslation
         }
-        interactionColor.setFill()
+        if actionLayout.secondaryRect.contains(location) {
+            return .commitOriginal
+        }
+        return nil
+    }
+
+    private func drawBackground() {
+        NSColor(calibratedWhite: 0.02, alpha: 0.14).setFill()
         NSBezierPath(
             roundedRect: bounds.insetBy(dx: 1, dy: 1),
             xRadius: TranslationCardStyle.cornerRadius - 1,
@@ -289,145 +438,91 @@ private final class TranslationCardView: NSView {
         ).fill()
     }
 
-    // 只有错误和失效这类例外状态才占用标题行，正常译文保持单行内容卡。
-    private func drawStatusHeader() {
-        let accentColor = currentAccentColor()
-        accentColor.setFill()
-        NSBezierPath(ovalIn: NSRect(x: 12, y: 10, width: 5, height: 5)).fill()
-
-        let titleAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .medium),
-            .foregroundColor: NSColor(calibratedWhite: 1, alpha: 0.50),
+    private func drawHeader() {
+        let headerAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10.5, weight: .medium),
+            .foregroundColor: NSColor(calibratedWhite: 1, alpha: 0.58),
         ]
-        NSString(string: titleText()).draw(
-            at: NSPoint(x: 23, y: 6),
+        NSString(string: content.languagePair).draw(
+            at: NSPoint(x: TranslationCardLayout.horizontalInset, y: 8),
+            withAttributes: headerAttributes
+        )
+    }
+
+    private func drawBody() {
+        var bodyColor = NSColor(calibratedWhite: 1, alpha: 0.92)
+        if content.presentation == .waiting || content.presentation == .loading {
+            bodyColor = NSColor(calibratedWhite: 1, alpha: 0.58)
+        }
+        if content.presentation == .error {
+            bodyColor = NSColor(calibratedRed: 1, green: 0.68, blue: 0.62, alpha: 0.92)
+        }
+        let bodyAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .regular),
+            .foregroundColor: bodyColor,
+        ]
+        var bodyHeight = bounds.height - TranslationCardLayout.headerHeight - 8
+        if content.presentation == .translation {
+            bodyHeight -= TranslationCardLayout.actionHeight + TranslationCardLayout.actionBottomInset + 8
+        }
+        NSString(string: content.bodyText).draw(
+            with: NSRect(
+                x: TranslationCardLayout.horizontalInset,
+                y: TranslationCardLayout.headerHeight,
+                width: max(bounds.width - TranslationCardLayout.horizontalInset * 2, 1),
+                height: max(bodyHeight, 18)
+            ),
+            options: [.usesLineFragmentOrigin, .usesFontLeading, .truncatesLastVisibleLine],
+            attributes: bodyAttributes
+        )
+    }
+
+    private func drawAction(
+        titleText: String,
+        actionName: TranslationOverlayAction,
+        actionRect: NSRect,
+        isPrimary: Bool
+    ) {
+        let isHovered = hoveredAction == actionName
+        let isPressed = pressedAction == actionName && isHovered
+        var fillColor = TranslationCardStyle.secondaryFillColor
+        var textColor = NSColor(calibratedWhite: 1, alpha: 0.78)
+        if isPrimary {
+            fillColor = NSColor(calibratedWhite: 0.96, alpha: isPressed ? 0.78 : 0.96)
+            textColor = NSColor(calibratedWhite: 0.10, alpha: 0.96)
+        } else if isPressed {
+            fillColor = NSColor(calibratedWhite: 1, alpha: 0.14)
+        } else if isHovered {
+            fillColor = NSColor(calibratedWhite: 1, alpha: 0.09)
+        }
+        fillColor.setFill()
+        NSBezierPath(roundedRect: actionRect, xRadius: 6, yRadius: 6).fill()
+        if !isPrimary {
+            TranslationCardStyle.borderColor.setStroke()
+            let borderPath = NSBezierPath(roundedRect: actionRect.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+            borderPath.lineWidth = 1
+            borderPath.stroke()
+        }
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11.5, weight: .semibold),
+            .foregroundColor: textColor,
+        ]
+        let titleValue = NSString(string: titleText)
+        let titleSize = titleValue.size(withAttributes: titleAttributes)
+        titleValue.draw(
+            at: NSPoint(
+                x: actionRect.midX - titleSize.width / 2,
+                y: actionRect.midY - titleSize.height / 2
+            ),
             withAttributes: titleAttributes
         )
     }
 
-    private func drawAction() {
-        guard content.replacementEnabled else { return }
-        if actionHovered {
-            var actionColor = TranslationCardStyle.accentColor.withAlphaComponent(0.16)
-            if actionPressed {
-                actionColor = TranslationCardStyle.accentColor.withAlphaComponent(0.28)
-            }
-            actionColor.setFill()
-            NSBezierPath(roundedRect: actionRect, xRadius: 6, yRadius: 6).fill()
-        }
-        let actionAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold),
-            .foregroundColor: TranslationCardStyle.accentColor,
-        ]
-        let actionText = NSString(string: "替换")
-        let actionWidth = actionText.size(withAttributes: actionAttributes).width
-        actionText.draw(
-            at: NSPoint(x: actionRect.midX - actionWidth / 2, y: actionRect.minY + 4),
-            withAttributes: actionAttributes
-        )
-    }
-
-    private func drawBodyText() {
-        var bodyColor = NSColor(calibratedWhite: 1, alpha: 0.92)
-        if content.presentation == .stale {
-            bodyColor = NSColor(calibratedWhite: 1, alpha: 0.66)
-        }
-        if content.presentation == .error {
-            bodyColor = NSColor(calibratedWhite: 1, alpha: 0.72)
-        }
-        let bodyAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 14, weight: .medium),
-            .foregroundColor: bodyColor,
-        ]
-        var bodyOriginY: CGFloat = 8
-        var bodyHeight: CGFloat = max(bounds.height - 16, 20)
-        if content.presentation != .translation {
-            bodyOriginY = 24
-            bodyHeight = bounds.height - 29
-        }
-        var trailingInset: CGFloat = 12
-        if content.replacementEnabled {
-            trailingInset = 76
-        }
-        NSString(string: content.bodyText).draw(
-            with: NSRect(
-                x: 12,
-                y: bodyOriginY,
-                width: max(bounds.width - 12 - trailingInset, 1),
-                height: bodyHeight
-            ),
-            options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
-            attributes: bodyAttributes
-        )
-    }
-
-    private func titleText() -> String {
-        if content.presentation == .stale {
-            return "\(content.languagePair) · 原文已变化"
-        }
-        if content.presentation == .error {
-            return "\(content.languagePair) · 翻译错误"
-        }
-        return content.languagePair
-    }
-
-    private func currentAccentColor() -> NSColor {
-        if content.presentation == .error {
-            return NSColor(calibratedRed: 1, green: 0.46, blue: 0.38, alpha: 1)
-        }
-        if content.presentation == .stale {
-            return NSColor(calibratedRed: 0.95, green: 0.65, blue: 0.22, alpha: 1)
-        }
-        return TranslationCardStyle.accentColor
-    }
-
-    // 正常态以正文和替换入口确定最小宽度，再分档避免译文长度轻微变化时横向跳动。
     private func calculateSize() -> NSSize {
-        let bodyAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 14, weight: .medium),
-        ]
-        let bodyWidth = NSString(string: content.bodyText).size(withAttributes: bodyAttributes).width
-        var actionWidth: CGFloat = 0
-        if content.replacementEnabled {
-            actionWidth = 64
-        }
-        var minimumWidth: CGFloat = 136 + actionWidth
-        if content.presentation != .translation {
-            minimumWidth = 210
-        }
-        minimumWidth = min(minimumWidth, maximumPanelWidth)
-        let preferredWidth = min(
-            max(bodyWidth + 24 + actionWidth, minimumWidth),
-            maximumPanelWidth
+        TranslationCardLayout.resolvedSize(
+            bodyText: content.bodyText,
+            presentation: content.presentation,
+            availableWidth: maximumPanelWidth
         )
-        let panelWidth = stablePanelWidth(
-            preferredWidth: preferredWidth,
-            minimumWidth: minimumWidth
-        )
-        let bodyRect = NSString(string: content.bodyText).boundingRect(
-            with: NSSize(
-                width: max(panelWidth - 24 - actionWidth, 1),
-                height: TranslationCardStyle.maximumTranslationBodyHeight
-            ),
-            options: [.usesLineFragmentOrigin],
-            attributes: bodyAttributes
-        )
-        var panelHeight = min(max(ceil(bodyRect.height) + 16, 36), 96)
-        if content.presentation != .translation {
-            panelHeight = min(max(ceil(bodyRect.height) + 30, 52), 110)
-        }
-        return NSSize(width: panelWidth, height: panelHeight)
-    }
-
-    // 用有限宽度档位避免译文长度轻微变化时浮层持续横向抖动。
-    private func stablePanelWidth(preferredWidth: CGFloat, minimumWidth: CGFloat) -> CGFloat {
-        let widthTierList: [CGFloat] = [160, 220, 320, 420, 560, 720, 960]
-        for widthTier in widthTierList {
-            let resolvedWidth = min(widthTier, maximumPanelWidth)
-            if resolvedWidth >= preferredWidth, resolvedWidth >= minimumWidth {
-                return resolvedWidth
-            }
-        }
-        return maximumPanelWidth
     }
 }

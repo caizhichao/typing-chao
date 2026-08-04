@@ -10,18 +10,19 @@ final class InputMethodSettingsWindowController: NSWindowController {
 
     private init() {
         let settingsWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 650, height: 440),
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         settingsWindow.title = "Typing 东南亚设置"
         settingsWindow.isReleasedWhenClosed = false
-        settingsViewController.preferredContentSize = NSSize(width: 650, height: 440)
+        settingsWindow.tabbingMode = .disallowed
+        settingsViewController.preferredContentSize = NSSize(width: 700, height: 500)
         settingsWindow.contentViewController = settingsViewController
-        settingsWindow.setContentSize(NSSize(width: 650, height: 440))
-        settingsWindow.contentMinSize = NSSize(width: 650, height: 440)
-        settingsWindow.contentMaxSize = NSSize(width: 650, height: 440)
+        settingsWindow.setContentSize(NSSize(width: 700, height: 500))
+        settingsWindow.contentMinSize = NSSize(width: 700, height: 500)
+        settingsWindow.contentMaxSize = NSSize(width: 700, height: 500)
         super.init(window: settingsWindow)
 
         settingsViewController.translationEnabledHandler = { [weak self] enabled in
@@ -39,7 +40,11 @@ final class InputMethodSettingsWindowController: NSWindowController {
             InputMethodSettings.shared.setTargetLanguage(targetLanguage)
         }
         settingsViewController.rimeOptionHandler = { [weak self] optionStateList in
-            self?.inputController?.applyRimeOptionStateList(optionStateList)
+            if let inputController = self?.inputController {
+                inputController.applyRimeOptionStateList(optionStateList)
+                return
+            }
+            InputMethodSettings.shared.persistRimeOptionStateList(optionStateList)
         }
     }
 
@@ -55,6 +60,7 @@ final class InputMethodSettingsWindowController: NSWindowController {
             window?.center()
             hasPositionedWindow = true
         }
+        window?.level = .normal
         NSApp.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
@@ -67,13 +73,13 @@ private enum InputMethodSettingsSection: Int {
 }
 
 private enum InputMethodSettingsStyle {
-    static let sidebarWidth: CGFloat = 160
+    static let sidebarWidth: CGFloat = 168
     static let accentColor = NSColor(calibratedRed: 0.03, green: 0.68, blue: 0.59, alpha: 1)
     static let cardBackgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.72)
     static let cardBorderColor = NSColor.separatorColor.withAlphaComponent(0.45)
 }
 
-// 负责绘制两页首版设置，并把所有变更通过明确回调交给当前输入控制器。
+// 负责绘制翻译和输入设置，并把业务变更通过明确回调交给当前输入控制器。
 private final class InputMethodSettingsViewController: NSViewController {
     var translationEnabledHandler: ((Bool) -> Void)?
     var targetLanguageHandler: ((TranslationTargetLanguage) -> Void)?
@@ -126,6 +132,7 @@ private final class InputMethodSettingsViewController: NSViewController {
         }
     }
 
+
     private func buildSidebar() {
         let sidebarView = NSVisualEffectView()
         sidebarView.material = .sidebar
@@ -145,7 +152,14 @@ private final class InputMethodSettingsViewController: NSViewController {
         inputSidebarButton.target = self
         inputSidebarButton.action = #selector(selectSidebarSection(_:))
 
-        let sidebarStack = NSStackView(views: [titleLabel, subtitleLabel, translationSidebarButton, inputSidebarButton])
+        let sidebarStack = NSStackView(
+            views: [
+                titleLabel,
+                subtitleLabel,
+                translationSidebarButton,
+                inputSidebarButton,
+            ]
+        )
         sidebarStack.orientation = .vertical
         sidebarStack.alignment = .leading
         sidebarStack.spacing = 6
@@ -198,7 +212,7 @@ private final class InputMethodSettingsViewController: NSViewController {
         let translationCard = makeCard(rows: [
             makeRow(
                 title: "边写边译",
-                subtitle: "停止输入 1 秒后，翻译光标前的完整当前句",
+                subtitle: "拼音提交后等待 1 秒；粘贴时只翻译剪贴板文本",
                 trailingControl: translationSwitch
             ),
             makeRow(
@@ -215,7 +229,7 @@ private final class InputMethodSettingsViewController: NSViewController {
             ),
             makeRow(
                 title: "手动翻译",
-                subtitle: "需要立即翻译时可按 Control + Shift + T",
+                subtitle: "立即翻译当前剪贴板可按 Control + Shift + T",
                 trailingControl: makeStatusLabel("快捷键")
             ),
         ])
@@ -238,11 +252,26 @@ private final class InputMethodSettingsViewController: NSViewController {
         characterWidthControl.target = self
         characterWidthControl.action = #selector(changeCharacterWidth(_:))
 
-        let inputCard = makeCard(rows: [
+        let inputModeCard = makeCard(rows: [
             makeRow(title: "输入模式", subtitle: "在当前输入法内切换中文或英文", trailingControl: inputModeControl),
             makeRow(title: "汉字", subtitle: "默认使用简体中文", trailingControl: characterFormControl),
-            makeRow(title: "标点", subtitle: "选择中文或西文标点", trailingControl: punctuationControl),
-            makeRow(title: "字符宽度", subtitle: "选择半角或全角字符", trailingControl: characterWidthControl),
+        ])
+        let characterCard = makeCard(rows: [
+            makeRow(
+                title: "字符宽度",
+                subtitle: "半角使用常规字符；全角转换拉丁字母、数字和空格宽度",
+                trailingControl: characterWidthControl
+            ),
+            makeRow(
+                title: "标点样式",
+                subtitle: "中文或西文标点独立设置，不与字符宽度混为同一状态",
+                trailingControl: punctuationControl
+            ),
+            makeRow(
+                title: "快捷切换",
+                subtitle: "输入时切换半角与全角，切换后显示当前状态",
+                trailingControl: makeStatusLabel("Shift + Space")
+            ),
         ])
         let noteLabel = makeLabel(
             text: "这些设置只影响 Typing 东南亚，不会切换、删除或修改其它 macOS 输入法。",
@@ -251,9 +280,10 @@ private final class InputMethodSettingsViewController: NSViewController {
         )
         noteLabel.textColor = .secondaryLabelColor
         noteLabel.maximumNumberOfLines = 2
-        let pageStack = makePageStack(views: [titleLabel, inputCard, noteLabel])
+        let pageStack = makePageStack(views: [titleLabel, inputModeCard, characterCard, noteLabel])
         installPageStack(pageStack, in: inputPage)
     }
+
 
     private func makePageStack(views: [NSView]) -> NSStackView {
         let stackView = NSStackView(views: views)
@@ -301,7 +331,7 @@ private final class InputMethodSettingsViewController: NSViewController {
             cardStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor),
             cardStack.topAnchor.constraint(equalTo: cardView.topAnchor),
             cardStack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor),
-            cardView.widthAnchor.constraint(equalToConstant: 434),
+            cardView.widthAnchor.constraint(equalToConstant: 462),
         ])
         return cardView
     }

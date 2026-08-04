@@ -103,6 +103,7 @@ final class InputMethodSettings {
         return schemaIdentifier
     }
 
+
     func persistedRimeOptionStateList() -> [RimeOptionState] {
         var optionStateList: [RimeOptionState] = []
         for optionName in RimeRuntimeOption.allCases where optionName.shouldPersist {
@@ -131,6 +132,7 @@ final class InputMethodSettings {
     func setSelectedSchemaIdentifier(_ schemaIdentifier: String) {
         userDefaults.set(schemaIdentifier, forKey: SettingKey.selectedSchema)
     }
+
 
     func persistRimeOptionStateList(_ optionStateList: [RimeOptionState]) {
         for optionState in optionStateList where optionState.optionName.shouldPersist {

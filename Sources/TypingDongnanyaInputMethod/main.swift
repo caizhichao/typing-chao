@@ -22,4 +22,5 @@ let server = IMKServer(
     bundleIdentifier: Bundle.main.bundleIdentifier
 )
 
+NSApplication.shared.delegate = TypingDongnanyaApplicationDelegate.shared
 NSApplication.shared.run()

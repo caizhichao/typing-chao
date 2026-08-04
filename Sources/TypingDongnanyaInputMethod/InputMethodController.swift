@@ -2,18 +2,23 @@ import AppKit
 import Carbon
 import InputMethodKit
 
-// 负责把 IMK 会话、完整 librime 快照、候选交互和稳定原文翻译串在同一个输入会话里。
+// 负责把 IMK 会话、完整 librime 快照、候选交互和输入法内部翻译草稿串在同一个输入会话里。
 final class TypingDongnanyaInputController: IMKInputController {
     private static weak var activeOverlayController: TypingDongnanyaInputController?
     private var rimeSession: TDNRimeSession?
     private let translationService = TranslationService()
     private let translationOverlay = TranslationOverlay()
     private let candidateOverlay = CandidateOverlay()
+    private let inputModeStatusOverlay = InputModeStatusOverlay()
     private var translationDraft = TranslationDraftState()
     private var translationTask: Task<Void, Never>?
-    private var translationGeneration = 0
     private var displayedTranslation: DisplayedTranslation?
+    private let translationSessionIdentifier = UUID().uuidString
+    private var isServerActive = false
+    private var translationGeneration = 0
     private var currentRimeSnapshot = RimeSnapshot(dictionary: [:])
+    private var overlayAnchorCache = InputOverlayAnchorCache()
+    private var sessionClient: IMKTextInput?
     private var lastClient: IMKTextInput?
     private var inputMethodMenu: InputMethodMenu?
 
@@ -37,13 +42,23 @@ final class TypingDongnanyaInputController: IMKInputController {
             self?.changeCandidatePage(pageBackward: pageBackward)
         }
         candidateOverlay.setSettingsHandler { [weak self] in
-            self?.showSettings()
+            DispatchQueue.main.async {
+                self?.showSettings()
+            }
         }
-        translationOverlay.setTranslationSelectionHandler { [weak self] in
-            self?.replaceSourceTextWithTranslation()
+        translationOverlay.setActionHandler { [weak self] actionName in
+            switch actionName {
+            case .useTranslation:
+                self?.commitDisplayedTranslation()
+            case .commitOriginal:
+                self?.commitOriginalTranslationDraft()
+            }
         }
+        sessionClient = inputClient as? IMKTextInput
+        lastClient = sessionClient
         inputMethodMenu = InputMethodMenu(inputController: self)
     }
+
 
     // 由 InputMethodKit 在输入法菜单展开时获取当前会话状态，避免菜单缓存旧的 Rime option。
     override func menu() -> NSMenu! {
@@ -58,117 +73,247 @@ final class TypingDongnanyaInputController: IMKInputController {
 
     override func activateServer(_ sender: Any!) {
         super.activateServer(sender)
-        // 激活回调的 sender 不是可靠的文本客户端，当前客户端必须由输入事件重新绑定。
+        // 激活时只绑定当前 IMK 会话，不启动跨进程正文或全局键盘监听。
+        isServerActive = true
+        if let activeController = Self.activeOverlayController,
+           activeController !== self {
+            activeController.resetForExternalActivation()
+        }
+        Self.activeOverlayController = self
         resetTranslationContext()
         rimeSession?.clearComposition()
         currentRimeSnapshot = RimeSnapshot(dictionary: [:])
         candidateOverlay.hide()
-        lastClient = nil
+        inputModeStatusOverlay.hide()
+        var inputClient = sessionClient
+        if let senderClient = sender as? IMKTextInput {
+            inputClient = senderClient
+        }
+        if let currentClient = client() {
+            inputClient = currentClient
+        }
+        if let inputClient {
+            prepareClient(inputClient)
+        }
     }
 
     override func deactivateServer(_ sender: Any!) {
-        // 输入源切出时清空组合态和浮层，避免旧会话在其它输入法激活后继续显示。
+        // 输入源切出前先上屏原文，避免输入法持有的 marked draft 因会话结束而丢失。
+        isServerActive = false
+        commitOriginalTranslationDraft()
         resetTranslationContext()
         rimeSession?.clearComposition()
         candidateOverlay.hide()
+        inputModeStatusOverlay.hide()
         currentRimeSnapshot = RimeSnapshot(dictionary: [:])
         if Self.activeOverlayController === self {
             Self.activeOverlayController = nil
         }
+        overlayAnchorCache.reset()
         lastClient = nil
         super.deactivateServer(sender)
     }
 
-    // 系统要求隐藏输入法面板时同时收口候选与异步译文，避免孤立浮窗残留在其它应用。
+    // 隐藏面板只隐藏当前浮层，不结束仍由 marked text 持有的翻译草稿。
     override func hidePalettes() {
-        resetTranslationContext()
-        rimeSession?.clearComposition()
+        cancelTranslationPresentationPreservingDraft()
         candidateOverlay.hide()
-        currentRimeSnapshot = RimeSnapshot(dictionary: [:])
-        if Self.activeOverlayController === self {
-            Self.activeOverlayController = nil
-        }
+        inputModeStatusOverlay.hide()
         super.hidePalettes()
     }
 
+    // 输入会话销毁时取消所有网络和宿主变更观察任务，避免客户端代理被异步任务继续持有。
+    override func inputControllerWillClose() {
+        isServerActive = false
+        if Self.activeOverlayController === self {
+            Self.activeOverlayController = nil
+        }
+        commitOriginalTranslationDraft()
+        resetTranslationContext()
+        inputModeStatusOverlay.hide()
+        overlayAnchorCache.reset()
+        sessionClient = nil
+        lastClient = nil
+        super.inputControllerWillClose()
+    }
+
     override func recognizedEvents(_ sender: Any!) -> Int {
-        Int(NSEvent.EventTypeMask.keyDown.rawValue)
+        let eventMask: NSEvent.EventTypeMask = [
+            .keyDown,
+            .leftMouseDown,
+            .leftMouseUp,
+            .rightMouseDown,
+            .rightMouseUp,
+        ]
+        return Int(eventMask.rawValue)
     }
 
     // 键盘入口优先保留系统 Command 快捷键，只把确认可交给 Rime 的按键写入引擎。
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
         guard let event else { return false }
-        guard event.type == .keyDown else { return false }
         guard let client = sender as? IMKTextInput else { return false }
         prepareClient(client)
 
+        if event.type != .keyDown {
+            if event.type == .leftMouseDown || event.type == .rightMouseDown {
+                overlayAnchorCache.reset()
+                _ = resolvedOverlayAnchor(client: client, allowsCachedAnchor: false)
+                if currentRimeSnapshot.isComposing || translationDraft.hasText {
+                    commitComposition(client)
+                } else {
+                    resetTranslationContext()
+                }
+            }
+            if event.type == .leftMouseUp || event.type == .rightMouseUp {
+                candidateOverlay.hide()
+            }
+            return false
+        }
+
         if event.modifierFlags.contains([.control, .shift]),
            event.charactersIgnoringModifiers?.lowercased() == "t" {
-            guard isRemoteTranslationAllowed else {
-                return false
-            }
-            scheduleCurrentTranslation(userInitiated: true)
-            return true
+            return activateClipboardTranslationDraft(client: client, userInitiated: true)
+        }
+        let controlKeyName = keyName(for: event) ?? ""
+        if event.modifierFlags.contains(.control),
+           !TranslationPolicy.controlShortcutUsesRime(controlKeyName) {
+            commitOriginalTranslationDraft()
+            candidateOverlay.hide()
+            return false
         }
         if event.modifierFlags.contains(.command) {
-            resetTranslationContext()
+            let commandKeyName = keyName(for: event) ?? ""
+            if TranslationPolicy.commandRequestsClipboardTranslation(commandKeyName) {
+                return activateClipboardTranslationDraft(client: client, userInitiated: false)
+            }
+            commitOriginalTranslationDraft()
             candidateOverlay.hide()
             return false
         }
 
         guard let keyName = keyName(for: event) else { return false }
-        let modifierNameList = modifierNames(for: event.modifierFlags)
-        guard let rimeSession else { return false }
-        let snapshot = RimeSnapshot(
-            dictionary: rimeSession.processKey(keyName, modifiers: modifierNameList)
-        )
-        guard snapshot.handled else {
-            handleUnhandledKey(keyName)
+        if keyName == "Escape" {
+            return clearInputCache(client: client)
+        }
+        if handleTranslationDraftEditingKey(keyName, client: client) {
+            return true
+        }
+        if TranslationPolicy.shouldPassThroughHostEditingKey(
+            keyName: keyName,
+            isComposing: currentRimeSnapshot.isComposing
+        ) {
+            resetTranslationContext()
+            candidateOverlay.hide()
             return false
+        }
+        let modifierNameList = modifierNames(for: event.modifierFlags)
+        guard let snapshot = processRimeKey(keyName, modifiers: modifierNameList) else {
+            return false
+        }
+        guard snapshot.handled else {
+            return handleUnhandledKey(keyName, client: client)
         }
         updateClient(client, snapshot: snapshot)
         return true
     }
 
-    // 文本输入入口沿用同一 Rime 快照更新链，避免系统走不同回调时丢失候选和翻译状态。
+    // 文本输入入口只把单个 ASCII 键交给 Rime；多字符回调仅在匹配剪贴板时触发翻译。
     override func inputText(_ string: String!, client sender: Any!) -> Bool {
         guard let string, let client = sender as? IMKTextInput else { return false }
         prepareClient(client)
-        guard let keyName = printableRimeKeyName(for: string) else {
-            handleUnhandledKey(string)
+        if string == "\u{1b}" {
+            return clearInputCache(client: client)
+        }
+        guard let keyName = TranslationPolicy.rimeKeyName(for: string) else {
+            let didActivateClipboardDraft = activateClipboardTranslationDraft(
+                client: client,
+                expectedText: string,
+                userInitiated: false
+            )
+            candidateOverlay.hide()
+            return didActivateClipboardDraft
+        }
+        if handleTranslationDraftEditingKey(keyName, client: client) {
+            return true
+        }
+        if TranslationPolicy.shouldPassThroughHostEditingKey(
+            keyName: keyName,
+            isComposing: currentRimeSnapshot.isComposing
+        ) {
+            resetTranslationContext()
+            candidateOverlay.hide()
             return false
         }
-        guard let rimeSession else { return false }
-        let snapshot = RimeSnapshot(
-            dictionary: rimeSession.processKey(keyName, modifiers: [])
-        )
-        guard snapshot.handled else {
-            handleUnhandledKey(keyName)
+        guard let snapshot = processRimeKey(keyName, modifiers: []) else {
             return false
+        }
+        guard snapshot.handled else {
+            return handleUnhandledKey(keyName, client: client)
         }
         updateClient(client, snapshot: snapshot)
         return true
     }
 
-    // 带键码文本入口只负责解析系统键码，后续状态仍走统一的 updateClient 主链路。
+    // 带键码文本入口保留宿主快捷键，只在收到 Command-V 或匹配剪贴板的多字符文本时翻译。
     override func inputText(_ string: String!, key keyCode: Int, modifiers flags: Int, client sender: Any!) -> Bool {
         guard let string, let client = sender as? IMKTextInput else { return false }
         prepareClient(client)
-        guard let rimeSession else { return false }
-        let modifierNameList = modifierNames(for: flags)
-        let resolvedKeyName = printableRimeKeyName(for: string) ?? keyName(for: keyCode)
-        let snapshot = RimeSnapshot(
-            dictionary: rimeSession.processKey(resolvedKeyName, modifiers: modifierNameList)
-        )
-        guard snapshot.handled else {
-            handleUnhandledKey(resolvedKeyName)
+        let modifierFlagSet = NSEvent.ModifierFlags(rawValue: UInt(flags))
+        let textKeyName = TranslationPolicy.rimeKeyName(for: string)
+        let resolvedKeyName = textKeyName ?? keyName(for: keyCode)
+        if modifierFlagSet.contains([.control, .shift]),
+           resolvedKeyName.lowercased() == "t" {
+            return activateClipboardTranslationDraft(client: client, userInitiated: true)
+        }
+        if modifierFlagSet.contains(.control),
+           !TranslationPolicy.controlShortcutUsesRime(resolvedKeyName) {
+            commitOriginalTranslationDraft()
+            candidateOverlay.hide()
             return false
+        }
+        if modifierFlagSet.contains(.command) {
+            if TranslationPolicy.commandRequestsClipboardTranslation(resolvedKeyName) {
+                return activateClipboardTranslationDraft(client: client, userInitiated: false)
+            }
+            commitOriginalTranslationDraft()
+            candidateOverlay.hide()
+            return false
+        }
+        if resolvedKeyName == "Escape" {
+            return clearInputCache(client: client)
+        }
+        if textKeyName == nil, !string.isEmpty {
+            let didActivateClipboardDraft = activateClipboardTranslationDraft(
+                client: client,
+                expectedText: string,
+                userInitiated: false
+            )
+            candidateOverlay.hide()
+            return didActivateClipboardDraft
+        }
+        let modifierNameList = modifierNames(for: flags)
+        if handleTranslationDraftEditingKey(resolvedKeyName, client: client) {
+            return true
+        }
+        if TranslationPolicy.shouldPassThroughHostEditingKey(
+            keyName: resolvedKeyName,
+            isComposing: currentRimeSnapshot.isComposing
+        ) {
+            resetTranslationContext()
+            candidateOverlay.hide()
+            return false
+        }
+        guard let snapshot = processRimeKey(resolvedKeyName, modifiers: modifierNameList) else {
+            return false
+        }
+        guard snapshot.handled else {
+            return handleUnhandledKey(resolvedKeyName, client: client)
         }
         updateClient(client, snapshot: snapshot)
         return true
     }
 
-    // 外部要求结束组字时提交 librime 已生成文本，并把该文本纳入同一翻译草稿。
+    // 外部要求结束组字时先收口 librime，再把完整内部草稿作为原文一次性提交宿主。
     override func commitComposition(_ sender: Any!) {
         guard let client = sender as? IMKTextInput else {
             super.commitComposition(sender)
@@ -179,32 +324,38 @@ final class TypingDongnanyaInputController: IMKInputController {
             let snapshot = RimeSnapshot(dictionary: rimeSession.commitComposition())
             currentRimeSnapshot = snapshot
             if !snapshot.commitText.isEmpty {
-                client.insertText(
+                handleConfirmedTextInput(
                     snapshot.commitText,
-                    replacementRange: NSRange(location: NSNotFound, length: 0)
+                    client: client,
+                    shouldScheduleTranslation: false
                 )
-                handleCommittedText(snapshot.commitText, client: client)
-                rimeSession.clearComposition()
-                candidateOverlay.hide()
-                return
             }
+            rimeSession.clearComposition()
+            currentRimeSnapshot = RimeSnapshot(dictionary: rimeSession.currentSnapshot())
+            candidateOverlay.hide()
+            if translationDraft.hasText {
+                commitOriginalTranslationDraft()
+            }
+            return
         }
         super.commitComposition(sender)
     }
 
     // 完整快照是 marked text、候选壳与提交文本的唯一状态来源，避免各层自行推断分页和光标。
     private func updateClient(_ client: IMKTextInput, snapshot: RimeSnapshot) {
-        let wasComposing = currentRimeSnapshot.isComposing
+        let previousSnapshot = currentRimeSnapshot
+        let wasComposing = previousSnapshot.isComposing
+        let statusMessage = InputModeStatusMessage.resolve(
+            previous: previousSnapshot,
+            current: snapshot
+        )
+        persistChangedCharacterOptionState(previous: previousSnapshot, current: snapshot)
         currentRimeSnapshot = snapshot
         if snapshot.isComposing {
-            postponeTranslationUntilCompositionSettles()
+            cancelTranslationPresentationPreservingDraft()
         }
         if !snapshot.commitText.isEmpty {
-            client.insertText(
-                snapshot.commitText,
-                replacementRange: NSRange(location: NSNotFound, length: 0)
-            )
-            handleCommittedText(
+            handleConfirmedTextInput(
                 snapshot.commitText,
                 client: client,
                 shouldScheduleTranslation: !snapshot.isComposing
@@ -212,40 +363,69 @@ final class TypingDongnanyaInputController: IMKInputController {
         }
 
         guard snapshot.isComposing else {
-            client.setMarkedText(
-                "",
-                selectionRange: NSRange(location: 0, length: 0),
-                replacementRange: NSRange(location: NSNotFound, length: 0)
-            )
+            refreshMarkedText(client: client, snapshot: snapshot)
             candidateOverlay.hide()
-            if wasComposing, snapshot.commitText.isEmpty {
-                scheduleCurrentTranslation(userInitiated: false)
+            if let statusMessage,
+               let anchor = resolvedOverlayAnchor(client: client, allowsCachedAnchor: false) {
+                inputModeStatusOverlay.show(
+                    message: statusMessage,
+                    anchor: anchor,
+                    candidateFrame: translationOverlay.visibleFrame
+                )
+            }
+            if translationDraft.hasText,
+               wasComposing,
+               snapshot.commitText.isEmpty {
+                scheduleCommittedTextTranslation(userInitiated: false)
             }
             return
         }
 
         let markedText = markedText(for: snapshot)
-        var markedSelectionRange = NSRange(location: snapshot.caretOffset, length: 0)
+        let draftUTF16Length = translationDraft.textValue.utf16.count
+        var markedSelectionRange = NSRange(
+            location: draftUTF16Length + snapshot.caretOffset,
+            length: 0
+        )
         if snapshot.selectionRange.length > 0 {
-            markedSelectionRange = snapshot.selectionRange
+            markedSelectionRange = NSRange(
+                location: draftUTF16Length + snapshot.selectionRange.location,
+                length: snapshot.selectionRange.length
+            )
         }
         client.setMarkedText(
             markedText,
             selectionRange: markedSelectionRange,
             replacementRange: NSRange(location: NSNotFound, length: 0)
         )
-        guard let anchor = InputOverlayAnchor(client: client) else {
+        guard let anchor = resolvedOverlayAnchor(client: client, allowsCachedAnchor: false) else {
             candidateOverlay.hide()
             translationOverlay.hide()
             return
         }
         candidateOverlay.show(snapshot: snapshot, anchor: anchor)
-        translationOverlay.updatePosition(anchor: anchor, candidateFrame: candidateOverlay.visibleFrame)
+        if isTranslationDraftModeActive {
+            translationOverlay.showWaiting(
+                languagePair: translationService.languagePairTitle,
+                anchor: anchor,
+                candidateFrame: candidateOverlay.visibleFrame
+            )
+        } else {
+            translationOverlay.updatePosition(anchor: anchor, candidateFrame: candidateOverlay.visibleFrame)
+        }
+        if let statusMessage {
+            inputModeStatusOverlay.show(
+                message: statusMessage,
+                anchor: anchor,
+                candidateFrame: candidateOverlay.visibleFrame
+            )
+        }
     }
 
-    // marked text 只补充组合范围和当前选中码段，不在客户端重复绘制候选文本。
+    // marked text 由已确认中文草稿和当前 librime preedit 组成，宿主正文只显示这一份原文。
     private func markedText(for snapshot: RimeSnapshot) -> NSAttributedString {
-        let markedText = NSMutableAttributedString(string: snapshot.preeditText)
+        let draftText = translationDraft.textValue
+        let markedText = NSMutableAttributedString(string: draftText + snapshot.preeditText)
         let fullRange = NSRange(location: 0, length: markedText.length)
         markedText.addAttribute(
             .underlineStyle,
@@ -257,51 +437,54 @@ final class TypingDongnanyaInputController: IMKInputController {
             value: NSColor(calibratedWhite: 0.45, alpha: 0.65),
             range: fullRange
         )
-        if snapshot.selectionRange.length > 0,
-           NSMaxRange(snapshot.selectionRange) <= markedText.length {
+        let draftUTF16Length = draftText.utf16.count
+        let selectedPreeditRange = NSRange(
+            location: draftUTF16Length + snapshot.selectionRange.location,
+            length: snapshot.selectionRange.length
+        )
+        if selectedPreeditRange.length > 0,
+           NSMaxRange(selectedPreeditRange) <= markedText.length {
             markedText.addAttribute(
                 .backgroundColor,
                 value: NSColor(calibratedRed: 0.03, green: 0.68, blue: 0.59, alpha: 0.18),
-                range: snapshot.selectionRange
+                range: selectedPreeditRange
             )
         }
         return markedText
     }
 
-    // 每次 Rime commit 都先进入稳定缓冲，只有组合态结束后才开始计算一秒稳定期。
-    private func handleCommittedText(
-        _ committedText: String,
+    // 翻译模式只把确认文本追加到内部草稿；关闭翻译或安全输入时才直接写入宿主。
+    private func handleConfirmedTextInput(
+        _ inputText: String,
         client: IMKTextInput,
         shouldScheduleTranslation: Bool = true
     ) {
-        guard InputMethodSettings.shared.isTranslationEnabled else {
-            resetTranslationContext()
+        guard isTranslationDraftModeActive else {
+            commitOriginalTranslationDraft(
+                client: client,
+                includesCurrentComposition: false
+            )
+            insertConfirmedText(inputText, client: client)
             return
         }
-        guard !isSecureInputActive else {
-            resetTranslationContext()
-            return
-        }
-        guard let sourceSnapshot = translationDraft.appendCommittedText(committedText, client: client) else {
-            return
-        }
-        let sentenceFinished = committedText.rangeOfCharacter(
-            from: TranslationPolicy.sentenceBoundaryCharacters
-        ) != nil || committedText.rangeOfCharacter(from: .newlines) != nil
-        if shouldScheduleTranslation {
+        let sourceSnapshot = translationDraft.appendConfirmedText(
+            inputText,
+            clientIdentifier: currentTranslationSessionIdentifier()
+        )
+        refreshMarkedText(client: client, snapshot: currentRimeSnapshot)
+        if shouldScheduleTranslation, let sourceSnapshot {
             scheduleTranslation(
                 fallbackSnapshot: sourceSnapshot,
                 client: client,
                 userInitiated: false
             )
-        }
-        if sentenceFinished {
-            translationDraft.startNextSentence()
+        } else if sourceSnapshot == nil {
+            showTranslationDraftWaiting(client: client)
         }
     }
 
-    // 手动翻译快捷键使用当前稳定草稿，不读取候选中的未提交拼音。
-    private func scheduleCurrentTranslation(userInitiated: Bool) {
+    // 组合结束但本轮没有新提交时，复用本输入法已知的稳定提交草稿。
+    private func scheduleCommittedTextTranslation(userInitiated: Bool) {
         guard isRemoteTranslationAllowed,
               let lastClient,
               let sourceSnapshot = translationDraft.currentSnapshot() else {
@@ -314,7 +497,46 @@ final class TypingDongnanyaInputController: IMKInputController {
         )
     }
 
-    // 每个请求固定原文、请求代次与提交时锚点；自动请求必须等输入稳定一秒。
+    // 只有宿主明确转发粘贴或用户手动触发时，剪贴板文本才成为新的 marked draft。
+    private func activateClipboardTranslationDraft(
+        client: IMKTextInput,
+        expectedText: String? = nil,
+        userInitiated: Bool
+    ) -> Bool {
+        guard isTranslationDraftModeActive else { return false }
+        guard let clipboardText = NSPasteboard.general.string(forType: .string) else {
+            return false
+        }
+        if let expectedText {
+            let normalizedExpectedText = expectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedClipboardText = clipboardText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedExpectedText.isEmpty,
+                  normalizedExpectedText == normalizedClipboardText else {
+                return false
+            }
+        }
+        let sourceSnapshot = translationDraft.synchronizeClipboardText(
+            clipboardText,
+            clientIdentifier: currentTranslationSessionIdentifier()
+        )
+        guard translationDraft.hasText else { return false }
+        rimeSession?.clearComposition()
+        currentRimeSnapshot = RimeSnapshot(dictionary: rimeSession?.currentSnapshot() ?? [:])
+        candidateOverlay.hide()
+        refreshMarkedText(client: client, snapshot: currentRimeSnapshot)
+        if let sourceSnapshot {
+            scheduleTranslation(
+                fallbackSnapshot: sourceSnapshot,
+                client: client,
+                userInitiated: userInitiated
+            )
+        } else {
+            showTranslationDraftWaiting(client: client)
+        }
+        return true
+    }
+
+    // 每个请求固定完整 marked draft、请求代次与锚点；自动请求等待一秒稳定期。
     private func scheduleTranslation(
         fallbackSnapshot: TranslationSourceSnapshot,
         client: IMKTextInput,
@@ -326,10 +548,20 @@ final class TypingDongnanyaInputController: IMKInputController {
         }
         translationGeneration += 1
         let requestGeneration = translationGeneration
-        let scheduledAnchor = InputOverlayAnchor(client: client)
+        let scheduledAnchor = resolvedOverlayAnchor(client: client)
+        var sourceKindName = "input-method-draft"
+        if fallbackSnapshot.sourceKind == .clipboardDraft {
+            sourceKindName = "clipboard"
+        }
+        NSLog(
+            "TypingDongnanya scheduled translation generation %d, source: %@, characters: %d",
+            requestGeneration,
+            sourceKindName,
+            fallbackSnapshot.sourceText.count
+        )
         translationTask?.cancel()
         displayedTranslation = nil
-        translationOverlay.hide()
+        showTranslationDraftWaiting(client: client, fallbackAnchor: scheduledAnchor)
         translationTask = Task { [weak self] in
             guard let self else { return }
             var delayMilliseconds = TranslationPolicy.stableInputDelayMilliseconds
@@ -339,86 +571,68 @@ final class TypingDongnanyaInputController: IMKInputController {
             try? await Task.sleep(for: .milliseconds(delayMilliseconds))
             guard !Task.isCancelled else { return }
 
-            let sourceSnapshot = await MainActor.run {
-                self.translationDraft.resolvedSnapshot(
-                    client: client,
-                    fallbackSnapshot: fallbackSnapshot
-                )
-            }
-            guard !sourceSnapshot.sourceText.isEmpty else {
-                return
-            }
             let requestCanStart = await MainActor.run {
-                guard self.translationGeneration == requestGeneration,
-                      self.isRemoteTranslationAllowed,
-                      self.isActiveOverlayController,
-                      !self.currentRimeSnapshot.isComposing,
-                      self.clientMatches(sourceSnapshot.clientIdentifier) else {
-                    return false
-                }
-                if TranslationPolicy.shouldRestartStableDelay(
-                    scheduledSourceText: fallbackSnapshot.sourceText,
-                    resolvedSourceText: sourceSnapshot.sourceText,
-                    userInitiated: userInitiated
-                ) {
-                    self.scheduleTranslation(
-                        fallbackSnapshot: sourceSnapshot,
-                        client: client,
-                        userInitiated: false
-                    )
-                    return false
-                }
-                return true
+                self.translationGeneration == requestGeneration &&
+                    self.isRemoteTranslationAllowed &&
+                    self.isActiveOverlayController &&
+                    !self.currentRimeSnapshot.isComposing &&
+                    self.translationDraft.resolvedSnapshot(
+                        clientIdentifier: self.currentTranslationSessionIdentifier(),
+                        fallbackSnapshot: fallbackSnapshot
+                    ) != nil
             }
             guard requestCanStart else {
+                NSLog("TypingDongnanya skipped translation generation %d before request", requestGeneration)
                 return
             }
 
+            NSLog(
+                "TypingDongnanya starting translation generation %d, characters: %d",
+                requestGeneration,
+                fallbackSnapshot.sourceText.count
+            )
+            await MainActor.run {
+                guard self.translationGeneration == requestGeneration,
+                      let anchor = self.resolvedOverlayAnchor(client: self.lastClient) ?? scheduledAnchor else {
+                    return
+                }
+                self.translationOverlay.showLoading(
+                    languagePair: self.translationService.languagePairTitle,
+                    anchor: anchor,
+                    candidateFrame: self.candidateOverlay.visibleFrame
+                )
+            }
+
             do {
-                let translatedText = try await self.translationService.translate(sourceSnapshot.sourceText)
+                let translatedText = try await self.translationService.translate(fallbackSnapshot.sourceText)
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     guard self.translationGeneration == requestGeneration,
                           self.isRemoteTranslationAllowed,
                           self.isActiveOverlayController,
                           !self.currentRimeSnapshot.isComposing,
-                          self.clientMatches(sourceSnapshot.clientIdentifier),
-                          let currentSourceSnapshot = self.currentTranslationSnapshot(
-                              fallbackSnapshot: sourceSnapshot
-                          ) else {
+                          self.translationDraft.resolvedSnapshot(
+                              clientIdentifier: self.currentTranslationSessionIdentifier(),
+                              fallbackSnapshot: fallbackSnapshot
+                          ) != nil else {
                         return
                     }
-                    if currentSourceSnapshot.sourceText != sourceSnapshot.sourceText {
-                        guard let lastClient = self.lastClient else { return }
-                        self.scheduleTranslation(
-                            fallbackSnapshot: currentSourceSnapshot,
-                            client: lastClient,
-                            userInitiated: false
-                        )
-                        return
-                    }
-                    let anchor = InputOverlayAnchor(client: self.lastClient) ?? scheduledAnchor
-                    var replacementRange: NSRange?
-                    if currentSourceSnapshot.canReplaceSource {
-                        replacementRange = currentSourceSnapshot.replacementRange
-                    }
-                    self.displayedTranslation = DisplayedTranslation(
-                        sourceText: currentSourceSnapshot.sourceText,
-                        translatedText: translatedText,
-                        replacementRange: replacementRange,
-                        clientIdentifier: currentSourceSnapshot.clientIdentifier
-                    )
-                    guard let anchor else {
+                    self.translationTask = nil
+                    guard let anchor = self.resolvedOverlayAnchor(client: self.lastClient) ?? scheduledAnchor else {
                         NSLog("TypingDongnanya translation completed without a valid overlay anchor")
                         return
                     }
+                    self.displayedTranslation = DisplayedTranslation(
+                        sourceSnapshot: fallbackSnapshot,
+                        translatedText: translatedText
+                    )
                     self.translationOverlay.showTranslation(
                         translatedText: translatedText,
                         languagePair: self.translationService.languagePairTitle,
-                        replacementEnabled: currentSourceSnapshot.canReplaceSource,
                         anchor: anchor,
                         candidateFrame: self.candidateOverlay.visibleFrame
                     )
+                    NSLog("TypingDongnanya displayed translation generation %d", requestGeneration)
                 }
             } catch {
                 guard !Task.isCancelled else { return }
@@ -428,22 +642,15 @@ final class TypingDongnanyaInputController: IMKInputController {
                           self.isRemoteTranslationAllowed,
                           self.isActiveOverlayController,
                           !self.currentRimeSnapshot.isComposing,
-                          self.clientMatches(sourceSnapshot.clientIdentifier),
-                          let currentSourceSnapshot = self.currentTranslationSnapshot(
-                              fallbackSnapshot: sourceSnapshot
-                          ) else {
+                          self.translationDraft.resolvedSnapshot(
+                              clientIdentifier: self.currentTranslationSessionIdentifier(),
+                              fallbackSnapshot: fallbackSnapshot
+                          ) != nil else {
                         return
                     }
-                    if currentSourceSnapshot.sourceText != sourceSnapshot.sourceText {
-                        guard let lastClient = self.lastClient else { return }
-                        self.scheduleTranslation(
-                            fallbackSnapshot: currentSourceSnapshot,
-                            client: lastClient,
-                            userInitiated: false
-                        )
-                        return
-                    }
-                    guard let anchor = InputOverlayAnchor(client: self.lastClient) ?? scheduledAnchor else {
+                    self.translationTask = nil
+                    self.displayedTranslation = nil
+                    guard let anchor = self.resolvedOverlayAnchor(client: self.lastClient) ?? scheduledAnchor else {
                         NSLog("TypingDongnanya translation error cannot be shown without a valid overlay anchor")
                         return
                     }
@@ -458,40 +665,20 @@ final class TypingDongnanyaInputController: IMKInputController {
         }
     }
 
-    // 返回结果必须重新绑定当前文档快照，源文本变化时废弃旧结果并为最终文本重新计时。
-    private func currentTranslationSnapshot(
-        fallbackSnapshot: TranslationSourceSnapshot
-    ) -> TranslationSourceSnapshot? {
-        guard let lastClient,
-              clientMatches(fallbackSnapshot.clientIdentifier) else {
-            return nil
-        }
-        return translationDraft.resolvedSnapshot(
-            client: lastClient,
-            fallbackSnapshot: fallbackSnapshot
-        )
-    }
-
-    // 点击替换前必须再次核对客户端、光标和原文正文，任何变化都只降为可阅读译文。
-    private func replaceSourceTextWithTranslation() {
+    // 使用译文只校验当前内部草稿快照，随后把译文一次性提交为宿主正文。
+    private func commitDisplayedTranslation() {
         guard let displayedTranslation, let lastClient else {
+            NSLog("TypingDongnanya ignored translation action without an active draft result")
             translationOverlay.hide()
             return
         }
-        guard let replacementRange = displayedTranslation.replacementRange else {
-            showStaleTranslation(displayedTranslation, client: lastClient)
-            return
-        }
-
-        let currentClientIdentifier = ObjectIdentifier(lastClient as AnyObject)
-        let selectedRange = lastClient.selectedRange()
-        let expectedSelectionLocation = NSMaxRange(replacementRange)
-        let currentSourceText = lastClient.attributedSubstring(from: replacementRange)?.string
-        guard currentClientIdentifier == displayedTranslation.clientIdentifier,
-              selectedRange.location == expectedSelectionLocation,
-              selectedRange.length == 0,
-              currentSourceText == displayedTranslation.sourceText else {
-            showStaleTranslation(displayedTranslation, client: lastClient)
+        guard translationDraft.resolvedSnapshot(
+            clientIdentifier: currentTranslationSessionIdentifier(),
+            fallbackSnapshot: displayedTranslation.sourceSnapshot
+        ) != nil else {
+            NSLog("TypingDongnanya rejected translation action because the marked draft changed")
+            self.displayedTranslation = nil
+            showTranslationDraftWaiting(client: lastClient)
             return
         }
 
@@ -499,33 +686,25 @@ final class TypingDongnanyaInputController: IMKInputController {
         translationTask?.cancel()
         lastClient.insertText(
             displayedTranslation.translatedText,
-            replacementRange: replacementRange
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        NSLog(
+            "TypingDongnanya committed translated draft, source characters: %d",
+            displayedTranslation.sourceSnapshot.sourceText.count
         )
         translationDraft.reset()
         self.displayedTranslation = nil
+        currentRimeSnapshot = RimeSnapshot(dictionary: rimeSession?.currentSnapshot() ?? [:])
         translationOverlay.hide()
     }
 
-    // 原文变化后保留译文用于阅读，但立即清除可写入状态，不能继续使用旧范围覆盖文本。
-    private func showStaleTranslation(_ translation: DisplayedTranslation, client: IMKTextInput) {
-        displayedTranslation = nil
-        guard let anchor = InputOverlayAnchor(client: client) else {
-            translationOverlay.hide()
-            return
-        }
-        translationOverlay.showStale(
-            translatedText: translation.translatedText,
-            languagePair: translationService.languagePairTitle,
-            anchor: anchor,
-            candidateFrame: candidateOverlay.visibleFrame
-        )
-    }
 
-    // 菜单切换 Rime 状态前先取消旧草稿，避免新字形或输入模式沿用旧句的可替换译文。
+    // 菜单切换 Rime 状态前先取消旧草稿，避免新字形或输入模式继续展示旧译文。
     func applyRimeOptionStateList(_ optionStateList: [RimeOptionState]) {
         guard let rimeSession, !optionStateList.isEmpty else {
             return
         }
+        commitOriginalTranslationDraft()
         resetTranslationContext()
         rimeSession.clearComposition()
         var snapshotDictionary = rimeSession.currentSnapshot()
@@ -539,11 +718,30 @@ final class TypingDongnanyaInputController: IMKInputController {
         refreshAfterRimeMenuAction(snapshotDictionary)
     }
 
+    // Rime 快捷键产生的半/全角和标点变化必须同步持久化，不能只在菜单操作时保存。
+    private func persistChangedCharacterOptionState(previous: RimeSnapshot, current: RimeSnapshot) {
+        guard !previous.schemaIdentifier.isEmpty else { return }
+        var optionStateList: [RimeOptionState] = []
+        if previous.isFullShape != current.isFullShape {
+            optionStateList.append(
+                RimeOptionState(optionName: .fullShape, isEnabled: current.isFullShape)
+            )
+        }
+        if previous.isAsciiPunctuation != current.isAsciiPunctuation {
+            optionStateList.append(
+                RimeOptionState(optionName: .asciiPunctuation, isEnabled: current.isAsciiPunctuation)
+            )
+        }
+        guard !optionStateList.isEmpty else { return }
+        InputMethodSettings.shared.persistRimeOptionStateList(optionStateList)
+    }
+
     // 输入方案选择只切换当前 librime 会话，绝不选择或改变 macOS 当前系统输入源。
     func selectRimeSchema(_ schemaIdentifier: String) {
         guard let rimeSession, !schemaIdentifier.isEmpty else {
             return
         }
+        commitOriginalTranslationDraft()
         resetTranslationContext()
         rimeSession.clearComposition()
         let snapshotDictionary = rimeSession.selectSchema(schemaIdentifier)
@@ -557,23 +755,32 @@ final class TypingDongnanyaInputController: IMKInputController {
 
     // 关闭翻译时立即取消请求和浮层，避免当前输入内容在设置切换后仍被发送。
     func setTranslationEnabled(_ enabled: Bool) {
+        if !enabled {
+            commitOriginalTranslationDraft()
+        }
         InputMethodSettings.shared.setTranslationEnabled(enabled)
         resetTranslationContext()
     }
 
-    // 目标语言改变后取消旧请求，下一段稳定文本必须按新语言重新翻译。
+    // 目标语言改变后保留 marked draft，并按新目标语言重新等待稳定期。
     func setTranslationTargetLanguage(_ targetLanguage: TranslationTargetLanguage) {
         InputMethodSettings.shared.setTargetLanguage(targetLanguage)
-        resetTranslationContext()
+        cancelTranslationPresentationPreservingDraft()
+        scheduleCommittedTextTranslation(userInitiated: false)
     }
 
     // 候选条与输入法菜单共用同一个设置入口，窗口打开时读取当前会话快照。
     func showSettings() {
-        InputMethodSettingsWindowController.shared.show(
+        candidateOverlay.hide()
+        inputModeStatusOverlay.hide()
+        TypingDongnanyaApplicationDelegate.shared.showSettings(
             inputController: self,
             snapshot: latestRimeSnapshot()
         )
     }
+
+
+
 
     // 新会话先恢复本项目保存的 Rime 方案和开关；英文模式按 schema 默认值保持会话级行为。
     private func restoreStoredRimeSettings() {
@@ -611,8 +818,8 @@ final class TypingDongnanyaInputController: IMKInputController {
 
     private func refreshAfterRimeMenuAction(_ snapshotDictionary: [String: Any]) {
         let snapshot = RimeSnapshot(dictionary: snapshotDictionary)
-        currentRimeSnapshot = snapshot
         guard let lastClient else {
+            currentRimeSnapshot = snapshot
             candidateOverlay.hide()
             return
         }
@@ -639,27 +846,47 @@ final class TypingDongnanyaInputController: IMKInputController {
         updateClient(lastClient, snapshot: snapshot)
     }
 
-    // 进程内只允许当前实际输入会话保留浮层，切换编辑器时先关闭旧控制器的窗口和异步状态。
+    // 同一控制器内 IMK 客户端代理可能逐次变化，只更新当前代理，不据此清空整句草稿。
     private func prepareClient(_ client: IMKTextInput) {
         if let activeController = Self.activeOverlayController,
            activeController !== self {
             activeController.resetForExternalActivation()
         }
         Self.activeOverlayController = self
-        let nextClientIdentifier = ObjectIdentifier(client as AnyObject)
-        if let lastClient {
-            let currentClientIdentifier = ObjectIdentifier(lastClient as AnyObject)
-            if currentClientIdentifier != nextClientIdentifier {
-                resetTranslationContext()
-                candidateOverlay.hide()
-            }
-        }
+        sessionClient = client
         lastClient = client
     }
 
-    private func clientMatches(_ clientIdentifier: ObjectIdentifier) -> Bool {
-        guard let lastClient else { return false }
-        return ObjectIdentifier(lastClient as AnyObject) == clientIdentifier
+
+    // 翻译草稿绑定当前控制器生命周期，不使用会在同一编辑框内抖动的 IMK 客户端标识。
+    private func currentTranslationSessionIdentifier() -> String {
+        translationSessionIdentifier
+    }
+
+    // 翻译层允许短暂复用同一 IMK 会话最近一次可信锚点，候选层仍只接受本次实时坐标。
+    private func resolvedOverlayAnchor(
+        client: IMKTextInput?,
+        allowsCachedAnchor: Bool = true
+    ) -> InputOverlayAnchor? {
+        guard let client else { return nil }
+        let clientIdentifier = overlayClientIdentifier(client)
+        let currentAnchor = InputOverlayAnchor(client: client)
+        if !allowsCachedAnchor, currentAnchor == nil {
+            return nil
+        }
+        return overlayAnchorCache.resolve(
+            currentAnchor: currentAnchor,
+            clientIdentifier: clientIdentifier
+        )
+    }
+
+    private func overlayClientIdentifier(_ client: IMKTextInput) -> String {
+        let bundleIdentifier = client.bundleIdentifier() ?? "<unknown>"
+        if let uniqueIdentifier = client.uniqueClientIdentifierString(),
+           !uniqueIdentifier.isEmpty {
+            return bundleIdentifier + ":" + uniqueIdentifier
+        }
+        return bundleIdentifier + ":" + String(describing: ObjectIdentifier(client as AnyObject))
     }
 
     private var isActiveOverlayController: Bool {
@@ -669,6 +896,11 @@ final class TypingDongnanyaInputController: IMKInputController {
     // 系统启用安全事件输入时禁止把已提交文本交给远程翻译服务。
     private var isSecureInputActive: Bool {
         IsSecureEventInputEnabled()
+    }
+
+    // 翻译开关开启且不处于安全输入时，确认文本由 marked draft 持有而不是立即上屏。
+    private var isTranslationDraftModeActive: Bool {
+        InputMethodSettings.shared.isTranslationEnabled && !isSecureInputActive
     }
 
     // 发送前和异步回写前共用同一资格判断，避免安全输入或设置变化后的旧任务继续运行。
@@ -681,15 +913,18 @@ final class TypingDongnanyaInputController: IMKInputController {
 
     // 其它输入会话接管时只收口本会话，不触碰新会话的 Rime 状态。
     private func resetForExternalActivation() {
+        commitOriginalTranslationDraft()
         resetTranslationContext()
         rimeSession?.clearComposition()
         candidateOverlay.hide()
+        inputModeStatusOverlay.hide()
         currentRimeSnapshot = RimeSnapshot(dictionary: [:])
+        overlayAnchorCache.reset()
         lastClient = nil
     }
 
-    // 组合码仍在编辑时只取消旧请求和旧译文，不清空已经提交的整句草稿。
-    private func postponeTranslationUntilCompositionSettles() {
+    // 组合码变化时取消旧请求和旧结果，但保留输入法内部已经确认的中文草稿。
+    private func cancelTranslationPresentationPreservingDraft() {
         translationGeneration += 1
         translationTask?.cancel()
         translationTask = nil
@@ -697,25 +932,195 @@ final class TypingDongnanyaInputController: IMKInputController {
         translationOverlay.hide()
     }
 
-    // 未被 Rime 接管的按键可能由宿主直接改写文本，因此统一结束旧草稿和替换范围。
-    private func handleUnhandledKey(_ keyName: String) {
-        if keyName == "Shift_L" || keyName == "Shift_R" {
+    // marked text 始终由内部草稿和当前 preedit 共同生成，避免宿主正文出现重复原文。
+    private func refreshMarkedText(client: IMKTextInput, snapshot: RimeSnapshot) {
+        guard isTranslationDraftModeActive, translationDraft.hasText || snapshot.isComposing else {
+            client.setMarkedText(
+                "",
+                selectionRange: NSRange(location: 0, length: 0),
+                replacementRange: NSRange(location: NSNotFound, length: 0)
+            )
             return
         }
-        if TranslationPolicy.preservesDraftForUnhandledKey(keyName) {
-            candidateOverlay.hide()
-            guard isRemoteTranslationAllowed,
-                  translationDraft.currentSnapshot() != nil else {
-                return
-            }
-            scheduleCurrentTranslation(userInitiated: false)
-            return
+        let draftUTF16Length = translationDraft.textValue.utf16.count
+        var selectionRange = NSRange(
+            location: draftUTF16Length + snapshot.caretOffset,
+            length: 0
+        )
+        if snapshot.selectionRange.length > 0 {
+            selectionRange = NSRange(
+                location: draftUTF16Length + snapshot.selectionRange.location,
+                length: snapshot.selectionRange.length
+            )
         }
-        resetTranslationContext()
-        candidateOverlay.hide()
+        client.setMarkedText(
+            markedText(for: snapshot),
+            selectionRange: selectionRange,
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
     }
 
-    // 输入会话、发送动作或上下文切换后统一取消旧请求并清空可点击替换状态。
+    // 草稿存在时稳定展示翻译模式，等待、超长和候选组合态共用同一光标锚点。
+    private func showTranslationDraftWaiting(
+        client: IMKTextInput,
+        fallbackAnchor: InputOverlayAnchor? = nil
+    ) {
+        guard isTranslationDraftModeActive,
+              let anchor = resolvedOverlayAnchor(client: client) ?? fallbackAnchor else {
+            translationOverlay.hide()
+            return
+        }
+        if translationDraft.exceedsCharacterLimit {
+            translationOverlay.showError(
+                message: "内容超过 600 个字符，请先上屏原文后继续输入",
+                languagePair: translationService.languagePairTitle,
+                anchor: anchor,
+                candidateFrame: candidateOverlay.visibleFrame
+            )
+            return
+        }
+        translationOverlay.showWaiting(
+            languagePair: translationService.languagePairTitle,
+            anchor: anchor,
+            candidateFrame: candidateOverlay.visibleFrame
+        )
+    }
+
+    // 空组合态的退格编辑内部草稿，回车确认原文，避免按键落到宿主后再追溯读取。
+    private func handleTranslationDraftEditingKey(
+        _ keyName: String,
+        client: IMKTextInput
+    ) -> Bool {
+        guard isTranslationDraftModeActive,
+              !currentRimeSnapshot.isComposing,
+              translationDraft.hasText else {
+            return false
+        }
+        if keyName == "BackSpace" {
+            cancelTranslationPresentationPreservingDraft()
+            let sourceSnapshot = translationDraft.removeLastCharacter(
+                clientIdentifier: currentTranslationSessionIdentifier()
+            )
+            refreshMarkedText(client: client, snapshot: currentRimeSnapshot)
+            if let sourceSnapshot {
+                scheduleTranslation(
+                    fallbackSnapshot: sourceSnapshot,
+                    client: client,
+                    userInitiated: false
+                )
+            } else if translationDraft.hasText {
+                showTranslationDraftWaiting(client: client)
+            } else {
+                translationOverlay.hide()
+            }
+            return true
+        }
+        if keyName == "Return" {
+            commitOriginalTranslationDraft(client: client)
+            return true
+        }
+        if keyName == "Delete" {
+            return true
+        }
+        return false
+    }
+
+    // 未被 Rime 接管的确定文本进入内部草稿；未知编辑动作先确认原文再交还宿主。
+    private func handleUnhandledKey(_ keyName: String, client: IMKTextInput) -> Bool {
+        if keyName == "Shift_L" || keyName == "Shift_R" {
+            return false
+        }
+        guard let passThroughText = TranslationPolicy.passThroughText(for: keyName) else {
+            commitOriginalTranslationDraft(client: client)
+            candidateOverlay.hide()
+            return false
+        }
+        guard isTranslationDraftModeActive else {
+            return false
+        }
+        let sourceSnapshot = translationDraft.appendConfirmedText(
+            passThroughText,
+            clientIdentifier: currentTranslationSessionIdentifier()
+        )
+        refreshMarkedText(client: client, snapshot: currentRimeSnapshot)
+        if let sourceSnapshot {
+            scheduleTranslation(
+                fallbackSnapshot: sourceSnapshot,
+                client: client,
+                userInitiated: false
+            )
+        } else {
+            showTranslationDraftWaiting(client: client)
+        }
+        candidateOverlay.hide()
+        return true
+    }
+
+    // 非翻译模式下确认文本直接写入宿主，不维护历史正文或替换范围。
+    private func insertConfirmedText(_ inputText: String, client: IMKTextInput) {
+        client.insertText(
+            inputText,
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+    }
+
+    // 上屏原文会先收口当前 librime preedit，再把完整 marked draft 一次性提交宿主。
+    private func commitOriginalTranslationDraft(
+        client: IMKTextInput? = nil,
+        includesCurrentComposition: Bool = true
+    ) {
+        let targetClient = client ?? lastClient
+        if includesCurrentComposition,
+           currentRimeSnapshot.isComposing,
+           let rimeSession {
+            let committedSnapshot = RimeSnapshot(dictionary: rimeSession.commitComposition())
+            if !committedSnapshot.commitText.isEmpty {
+                _ = translationDraft.appendConfirmedText(
+                    committedSnapshot.commitText,
+                    clientIdentifier: currentTranslationSessionIdentifier()
+                )
+            }
+            rimeSession.clearComposition()
+            currentRimeSnapshot = RimeSnapshot(dictionary: rimeSession.currentSnapshot())
+        }
+        guard let targetClient, translationDraft.hasText else {
+            return
+        }
+        let originalText = translationDraft.textValue
+        translationGeneration += 1
+        translationTask?.cancel()
+        translationTask = nil
+        displayedTranslation = nil
+        targetClient.insertText(
+            originalText,
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        NSLog(
+            "TypingDongnanya committed original translation draft, characters: %d",
+            originalText.count
+        )
+        translationDraft.reset()
+        candidateOverlay.hide()
+        translationOverlay.hide()
+    }
+
+    // Esc 只取消当前拼音和译文展示，已经确认的 marked draft 保留给后续继续输入。
+    private func clearInputCache(client: IMKTextInput) -> Bool {
+        let hadActiveInputState = currentRimeSnapshot.isComposing ||
+            translationDraft.hasText ||
+            translationTask != nil
+        cancelTranslationPresentationPreservingDraft()
+        rimeSession?.clearComposition()
+        let snapshotDictionary = rimeSession?.currentSnapshot() ?? [:]
+        currentRimeSnapshot = RimeSnapshot(dictionary: snapshotDictionary)
+        refreshMarkedText(client: client, snapshot: currentRimeSnapshot)
+        candidateOverlay.hide()
+        inputModeStatusOverlay.hide()
+        overlayAnchorCache.reset()
+        return hadActiveInputState
+    }
+
+    // 输入会话结束或最终提交后统一取消旧请求并清空内部草稿。
     private func resetTranslationContext() {
         translationGeneration += 1
         translationTask?.cancel()
@@ -725,18 +1130,36 @@ final class TypingDongnanyaInputController: IMKInputController {
         translationOverlay.hide()
     }
 
-    // 文本回调只把单个 ASCII 可打印键交给 Rime，多字符粘贴和直接文本必须保留给宿主。
-    private func printableRimeKeyName(for textValue: String) -> String? {
-        guard textValue.utf8.count == 1,
-              let scalarValue = textValue.unicodeScalars.first?.value,
-              scalarValue >= 0x20,
-              scalarValue <= 0x7e else {
-            return nil
+    // 符号产生多选标点时在 UI 刷新前直接确认目标项，避免首符号或拼音后的符号拉起候选条。
+    private func processRimeKey(_ keyName: String, modifiers: [String]) -> RimeSnapshot? {
+        guard let rimeSession else { return nil }
+        let previousSnapshot = currentRimeSnapshot
+        var snapshot = RimeSnapshot(
+            dictionary: rimeSession.processKey(keyName, modifiers: modifiers)
+        )
+        guard let candidateIndex = RimeInputPolicy.directSymbolCandidateIndex(
+            keyName: keyName,
+            previousSnapshot: previousSnapshot,
+            currentSnapshot: snapshot
+        ) else {
+            return snapshot
         }
-        return textValue
+        let committedSnapshot = RimeSnapshot(
+            dictionary: rimeSession.selectCandidate(UInt(candidateIndex))
+        )
+        if committedSnapshot.handled {
+            snapshot = committedSnapshot
+        } else {
+            NSLog("TypingDongnanya failed to commit direct symbol candidate")
+        }
+        return snapshot
     }
 
     private func keyName(for event: NSEvent) -> String? {
+        // Shift-Space 必须保留为 Rime 命名键，不能被可打印空格分支降成普通字符而绕过 full_shape 绑定。
+        if event.keyCode == UInt16(kVK_Space) {
+            return "space"
+        }
         if let characters = event.charactersIgnoringModifiers,
            characters.count == 1,
            let scalar = characters.unicodeScalars.first,
@@ -750,6 +1173,7 @@ final class TypingDongnanyaInputController: IMKInputController {
     private func keyName(for keyCode: Int) -> String {
         switch keyCode {
         case 36: return "Return"
+        case 76: return "Return"
         case 48: return "Tab"
         case 49: return "space"
         case 51: return "BackSpace"
@@ -782,12 +1206,10 @@ final class TypingDongnanyaInputController: IMKInputController {
     }
 }
 
-// 保存已经展示给用户的译文及其原始文档事务边界，点击时不再读取可变草稿状态。
+// 保存当前可确认译文与其对应的不可变内部草稿快照。
 private struct DisplayedTranslation {
-    let sourceText: String
+    let sourceSnapshot: TranslationSourceSnapshot
     let translatedText: String
-    let replacementRange: NSRange?
-    let clientIdentifier: ObjectIdentifier
 }
 
 final class TypingDongnanyaInputMethodDelegate: NSObject {}
