@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 
 const projectRoot = resolve(import.meta.dir, "../..");
 const outputPath = resolve(
-  process.argv[2] ?? `${projectRoot}/Resources/TypingDongnanyaMenuIconV4.pdf`,
+  process.argv[2] ?? `${projectRoot}/platforms/macos/Resources/TypingDongnanyaMenuIconV4.pdf`,
 );
 
 // 输入源菜单图标只绘制透明背景上的单色双向箭头，避免模板着色把背景渲染成实心方块。

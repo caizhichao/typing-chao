@@ -6,14 +6,14 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const projectRoot = resolve(import.meta.dir, "../..");
-const sourceApp = join(projectRoot, "build", "TypingDongnanya.app");
+const sourceApp = join(projectRoot, "platforms", "macos", "build", "TypingDongnanya.app");
 const userInputMethodsRoot = join(homedir(), "Library", "Input Methods");
 const oldUserApp = join(userInputMethodsRoot, "TypingDongnanya.app");
 const systemInputMethodsRoot = "/Library/Input Methods";
 const destinationApp = join(systemInputMethodsRoot, "TypingDongnanya.app");
 
 if (!existsSync(sourceApp)) {
-  console.error("找不到 build/TypingDongnanya.app，请先执行 bun run scripts/macos/build.ts");
+  console.error("找不到 platforms/macos/build/TypingDongnanya.app，请先执行 bun run build:macos");
   process.exit(1);
 }
 

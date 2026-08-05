@@ -1,0 +1,10 @@
+{
+  "project": "Android Open Source Project PinyinIME",
+  "repository": "https://android.googlesource.com/platform/packages/inputmethods/PinyinIME",
+  "commit": "49aebad1c1cfbbcaa9288ffed5161e79e57c3679",
+  "sourceFile": "jni/data/rawdict_utf16_65105_freq.txt",
+  "sourceSha256": "408700f28a56091fa07f3b849a0f134fbfc71e6b2ae9b3f52973a5b076f599ff",
+  "noticeSha256": "b5830d96fb5a7e7e7ebcc295f352846b4b998e78fdc8f9aa68e134d2e4b39986",
+  "license": "Apache-2.0",
+  "retrievedAt": "2026-08-05"
+}

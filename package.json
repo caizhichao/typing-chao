@@ -1,0 +1,16 @@
+{
+  "name": "typing-dongnanya",
+  "private": true,
+  "scripts": {
+    "build": "bun run build:macos",
+    "test": "bun run test:macos",
+    "build:all": "bun run build:macos && bun run build:android",
+    "test:all": "bun run test:macos && bun run test:android",
+    "build:macos": "bun run scripts/macos/build.ts",
+    "test:macos": "bun run scripts/macos/test.ts",
+    "install:macos": "bun run scripts/macos/install.ts",
+    "build:android": "bun run scripts/android/build.ts",
+    "test:android": "bun run scripts/android/test.ts",
+    "install:android": "bun run scripts/android/install.ts"
+  }
+}

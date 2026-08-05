@@ -1,0 +1,24 @@
+# Rime default configuration
+# encoding: utf-8
+
+config_version: "1.0"
+
+schema_list:
+  - schema: typing_pinyin
+  - schema: typing_double_pinyin_natural
+  - schema: typing_double_pinyin_flypy
+  - schema: typing_pinyin_t9
+  - schema: typing_wubi86
+
+menu:
+  page_size: 5
+
+switcher:
+  caption: 输入方案
+  hotkeys:
+    - Control+grave
+
+key_binder:
+  bindings:
+    - { when: always, accept: Shift+space, toggle: full_shape }
+    - { when: always, accept: Control+period, toggle: ascii_punct }

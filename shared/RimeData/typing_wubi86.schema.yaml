@@ -1,0 +1,33 @@
+# Rime schema
+# encoding: utf-8
+
+__include: typing_pinyin.schema:/
+
+# 项目五笔方案只复用通用输入状态和标点配置，编码与词典来自锁定的 MIT 数据源。
+schema:
+  schema_id: typing_wubi86
+  name: 五笔 86
+  version: "1.0"
+  author:
+    - Typing Dongnanya
+  description: |
+    五笔 86 键盘输入，候选和词组使用项目锁定并保留来源声明的 MIT 码表。
+
+engine:
+  translators:
+    - punct_translator
+    - table_translator
+
+speller:
+  alphabet: yxwvutsrqponmlkjihgfedcba
+  initials: yxwvutsrqponmlkjihgfedcba
+  delimiter: " '"
+  max_code_length: 4
+
+translator:
+  dictionary: typing_wubi86
+  prism: typing_wubi86
+  enable_charset_filter: false
+  enable_completion: true
+  enable_sentence: false
+  enable_user_dict: true

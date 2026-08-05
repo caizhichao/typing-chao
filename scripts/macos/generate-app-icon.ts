@@ -8,10 +8,10 @@ import { spawnSync } from "node:child_process";
 
 const projectRoot = resolve(import.meta.dir, "../..");
 const pdfPath = resolve(
-  process.argv[2] ?? `${projectRoot}/Resources/TypingDongnanyaAppIcon.pdf`,
+  process.argv[2] ?? `${projectRoot}/platforms/macos/Resources/TypingDongnanyaAppIcon.pdf`,
 );
 const icnsPath = resolve(
-  process.argv[3] ?? `${projectRoot}/Resources/TypingDongnanyaAppIcon.icns`,
+  process.argv[3] ?? `${projectRoot}/platforms/macos/Resources/TypingDongnanyaAppIcon.icns`,
 );
 
 // 注册页图标采用独立彩色应用图标；菜单仍使用透明单色模板，二者不可再复用同一资源。

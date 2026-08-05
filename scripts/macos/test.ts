@@ -1,20 +1,28 @@
 #!/usr/bin/env bun
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const projectRoot = resolve(import.meta.dir, "../..");
-const buildRoot = join(projectRoot, "build");
+const macOSRoot = join(projectRoot, "platforms", "macos");
+const sourceRoot = join(macOSRoot, "Sources", "TypingDongnanyaInputMethod");
+const testRoot = join(macOSRoot, "Tests");
+const macOSInfoPath = join(macOSRoot, "Info.plist");
+const buildRoot = join(macOSRoot, "build");
+const testBuildRoot = join(buildRoot, "tests");
+const testBinaryRoot = join(testBuildRoot, "bin");
+const testDataRoot = join(testBuildRoot, "data");
 const proxyAccessTokenPath = join(homedir(), ".config", "typing-dongnanya", "access-token");
 const vendorRoot = join(projectRoot, "vendor", "librime");
 const sdkPath = runText("xcrun", ["--show-sdk-path"]);
 const architecture = runText("arch", []);
-const smokeDirectory = join(buildRoot, "test-rime-data");
-const outputPath = join(buildRoot, "RimeSmoke");
+const smokeDirectory = join(testDataRoot, "rime");
+const outputPath = join(testBinaryRoot, "RimeSmoke");
 
 run("bun", ["run", "scripts/macos/build.ts"]);
+verifyCommercialRimeDataContract();
 verifyStableDevelopmentCodeRequirement();
 verifyBundledTranslationEndpoint();
 verifyTranslationPromptContract();
@@ -26,6 +34,7 @@ verifyDirectSymbolContract();
 verifyKnownPassThroughContract();
 verifyNoExternalPermissionContract();
 verifyCandidateSettingsContract();
+mkdirSync(testBinaryRoot, { recursive: true });
 mkdirSync(smokeDirectory, { recursive: true });
 run("clang++", [
   "-std=c++17",
@@ -37,7 +46,7 @@ run("clang++", [
   join(vendorRoot, "src"),
   "-I",
   join(vendorRoot, "include"),
-  join(projectRoot, "Tests", "RimeSmoke.cc"),
+  join(testRoot, "RimeSmoke.cc"),
   join(vendorRoot, "build", "lib", "librime.a"),
   "-L",
   join(vendorRoot, "lib"),
@@ -63,7 +72,7 @@ run(outputPath, [
 ]);
 
 const editorSnapshotSmokeOutputPath = join(
-  buildRoot,
+  testBinaryRoot,
   "TranslationEditorSnapshotSmoke",
 );
 run("swiftc", [
@@ -71,60 +80,54 @@ run("swiftc", [
   `${architecture}-apple-macosx13.0`,
   "-sdk",
   sdkPath,
-  join(
-    projectRoot,
-    "Sources",
-    "TypingDongnanyaInputMethod",
+  join(sourceRoot,
     "TranslationDraft.swift",
   ),
-  join(projectRoot, "Tests", "TranslationEditorSnapshotSmoke.swift"),
+  join(testRoot, "TranslationEditorSnapshotSmoke.swift"),
   "-o",
   editorSnapshotSmokeOutputPath,
 ]);
 run(editorSnapshotSmokeOutputPath, []);
 
-const settingsSmokeOutputPath = join(buildRoot, "InputMethodSettingsSmoke");
+const settingsSmokeOutputPath = join(testBinaryRoot, "InputMethodSettingsSmoke");
 run("swiftc", [
   "-target",
   `${architecture}-apple-macosx13.0`,
   "-sdk",
   sdkPath,
-  join(
-    projectRoot,
-    "Sources",
-    "TypingDongnanyaInputMethod",
+  join(sourceRoot,
     "InputMethodSettings.swift",
   ),
-  join(projectRoot, "Tests", "InputMethodSettingsSmoke.swift"),
+  join(testRoot, "InputMethodSettingsSmoke.swift"),
   "-o",
   settingsSmokeOutputPath,
 ]);
 run(settingsSmokeOutputPath, []);
 
-const rimeInputPolicySmokeOutputPath = join(buildRoot, "RimeInputPolicySmoke");
+const rimeInputPolicySmokeOutputPath = join(testBinaryRoot, "RimeInputPolicySmoke");
 run("swiftc", [
   "-target",
   `${architecture}-apple-macosx13.0`,
   "-sdk",
   sdkPath,
-  join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "RimeSnapshot.swift"),
-  join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "RimeInputPolicy.swift"),
-  join(projectRoot, "Tests", "RimeInputPolicySmoke.swift"),
+  join(sourceRoot, "RimeSnapshot.swift"),
+  join(sourceRoot, "RimeInputPolicy.swift"),
+  join(testRoot, "RimeInputPolicySmoke.swift"),
   "-o",
   rimeInputPolicySmokeOutputPath,
 ]);
 run(rimeInputPolicySmokeOutputPath, []);
 
-const inputModeStatusSmokeOutputPath = join(buildRoot, "InputModeStatusOverlaySmoke");
+const inputModeStatusSmokeOutputPath = join(testBinaryRoot, "InputModeStatusOverlaySmoke");
 run("swiftc", [
   "-target",
   `${architecture}-apple-macosx13.0`,
   "-sdk",
   sdkPath,
-  join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "RimeSnapshot.swift"),
-  join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "OverlayLayout.swift"),
-  join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "InputModeStatusOverlay.swift"),
-  join(projectRoot, "Tests", "InputModeStatusOverlaySmoke.swift"),
+  join(sourceRoot, "RimeSnapshot.swift"),
+  join(sourceRoot, "OverlayLayout.swift"),
+  join(sourceRoot, "InputModeStatusOverlay.swift"),
+  join(testRoot, "InputModeStatusOverlaySmoke.swift"),
   "-framework",
   "AppKit",
   "-framework",
@@ -136,16 +139,16 @@ run("swiftc", [
 ]);
 run(inputModeStatusSmokeOutputPath, []);
 
-const candidateBarLayoutSmokeOutputPath = join(buildRoot, "CandidateBarLayoutSmoke");
+const candidateBarLayoutSmokeOutputPath = join(testBinaryRoot, "CandidateBarLayoutSmoke");
 run("swiftc", [
   "-target",
   `${architecture}-apple-macosx13.0`,
   "-sdk",
   sdkPath,
-  join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "RimeSnapshot.swift"),
-  join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "OverlayLayout.swift"),
-  join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "CandidateOverlay.swift"),
-  join(projectRoot, "Tests", "CandidateBarLayoutSmoke.swift"),
+  join(sourceRoot, "RimeSnapshot.swift"),
+  join(sourceRoot, "OverlayLayout.swift"),
+  join(sourceRoot, "CandidateOverlay.swift"),
+  join(testRoot, "CandidateBarLayoutSmoke.swift"),
   "-framework",
   "AppKit",
   "-framework",
@@ -157,20 +160,17 @@ run("swiftc", [
 ]);
 run(candidateBarLayoutSmokeOutputPath, []);
 
-const inputSourceRegistrationSmokeOutputPath = join(buildRoot, "InputSourceRegistrationSmoke");
+const inputSourceRegistrationSmokeOutputPath = join(testBinaryRoot, "InputSourceRegistrationSmoke");
 run("swiftc", [
   "-parse-as-library",
   "-target",
   `${architecture}-apple-macosx13.0`,
   "-sdk",
   sdkPath,
-  join(
-    projectRoot,
-    "Sources",
-    "TypingDongnanyaInputMethod",
+  join(sourceRoot,
     "InputSourceRegistration.swift",
   ),
-  join(projectRoot, "Tests", "InputSourceRegistrationSmoke.swift"),
+  join(testRoot, "InputSourceRegistrationSmoke.swift"),
   "-framework",
   "Carbon",
   "-o",
@@ -178,19 +178,16 @@ run("swiftc", [
 ]);
 run(inputSourceRegistrationSmokeOutputPath, []);
 
-const overlayLayoutSmokeOutputPath = join(buildRoot, "OverlayLayoutSmoke");
+const overlayLayoutSmokeOutputPath = join(testBinaryRoot, "OverlayLayoutSmoke");
 run("swiftc", [
   "-target",
   `${architecture}-apple-macosx13.0`,
   "-sdk",
   sdkPath,
-  join(
-    projectRoot,
-    "Sources",
-    "TypingDongnanyaInputMethod",
+  join(sourceRoot,
     "OverlayLayout.swift",
   ),
-  join(projectRoot, "Tests", "OverlayLayoutSmoke.swift"),
+  join(testRoot, "OverlayLayoutSmoke.swift"),
   "-framework",
   "AppKit",
   "-framework",
@@ -202,25 +199,19 @@ run("swiftc", [
 ]);
 run(overlayLayoutSmokeOutputPath, []);
 
-const translationOverlaySmokeOutputPath = join(buildRoot, "TranslationOverlaySmoke");
+const translationOverlaySmokeOutputPath = join(testBinaryRoot, "TranslationOverlaySmoke");
 run("swiftc", [
   "-target",
   `${architecture}-apple-macosx13.0`,
   "-sdk",
   sdkPath,
-  join(
-    projectRoot,
-    "Sources",
-    "TypingDongnanyaInputMethod",
+  join(sourceRoot,
     "OverlayLayout.swift",
   ),
-  join(
-    projectRoot,
-    "Sources",
-    "TypingDongnanyaInputMethod",
+  join(sourceRoot,
     "TranslationOverlay.swift",
   ),
-  join(projectRoot, "Tests", "TranslationOverlaySmoke.swift"),
+  join(testRoot, "TranslationOverlaySmoke.swift"),
   "-framework",
   "AppKit",
   "-framework",
@@ -232,14 +223,14 @@ run("swiftc", [
 ]);
 run(translationOverlaySmokeOutputPath, []);
 
-const menuIconSmokeOutputPath = join(buildRoot, "MenuIconSmoke");
+const menuIconSmokeOutputPath = join(testBinaryRoot, "MenuIconSmoke");
 run("swiftc", [
   "-parse-as-library",
   "-target",
   `${architecture}-apple-macosx13.0`,
   "-sdk",
   sdkPath,
-  join(projectRoot, "Tests", "MenuIconSmoke.swift"),
+  join(testRoot, "MenuIconSmoke.swift"),
   "-framework",
   "AppKit",
   "-o",
@@ -249,14 +240,14 @@ run(menuIconSmokeOutputPath, [
   join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", "TypingDongnanyaMenuIconV4.pdf"),
 ]);
 
-const appIconSmokeOutputPath = join(buildRoot, "AppIconSmoke");
+const appIconSmokeOutputPath = join(testBinaryRoot, "AppIconSmoke");
 run("swiftc", [
   "-parse-as-library",
   "-target",
   `${architecture}-apple-macosx13.0`,
   "-sdk",
   sdkPath,
-  join(projectRoot, "Tests", "AppIconSmoke.swift"),
+  join(testRoot, "AppIconSmoke.swift"),
   "-framework",
   "AppKit",
   "-o",
@@ -266,8 +257,8 @@ run(appIconSmokeOutputPath, [
   join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", "TypingDongnanyaAppIcon.pdf"),
 ]);
 
-const bridgeSmokeDirectory = join(buildRoot, "test-rime-bridge-data");
-const bridgeSmokeOutputPath = join(buildRoot, "RimeBridgeSmoke");
+const bridgeSmokeDirectory = join(testDataRoot, "rime-bridge");
+const bridgeSmokeOutputPath = join(testBinaryRoot, "RimeBridgeSmoke");
 mkdirSync(bridgeSmokeDirectory, { recursive: true });
 run("clang++", [
   "-std=c++17",
@@ -277,12 +268,12 @@ run("clang++", [
   "-isysroot",
   sdkPath,
   "-I",
-  join(projectRoot, "Sources", "TypingDongnanyaInputMethod"),
+  sourceRoot,
   "-I",
   join(vendorRoot, "src"),
   "-I",
   join(vendorRoot, "include"),
-  join(projectRoot, "Tests", "RimeBridgeSmoke.mm"),
+  join(testRoot, "RimeBridgeSmoke.mm"),
   join(buildRoot, "obj", "RimeBridge.o"),
   join(vendorRoot, "build", "lib", "librime.a"),
   "-L",
@@ -313,10 +304,7 @@ run(bridgeSmokeOutputPath, [
 // hidePalettes 只收口当前浮层；输入源真正停用时才释放活动会话。
 function verifyInputControllerLifecycleContract() {
   const controllerSource = readFileSync(
-    join(
-      projectRoot,
-      "Sources",
-      "TypingDongnanyaInputMethod",
+    join(sourceRoot,
       "InputMethodController.swift",
     ),
     "utf8",
@@ -348,11 +336,11 @@ function verifyInputControllerLifecycleContract() {
 // 输入按键主路径不得启动跨进程监听、读取宿主正文或执行常驻轮询。
 function verifyInputLatencyContract() {
   const controllerSource = readFileSync(
-    join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "InputMethodController.swift"),
+    join(sourceRoot, "InputMethodController.swift"),
     "utf8",
   );
   const draftSource = readFileSync(
-    join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "TranslationDraft.swift"),
+    join(sourceRoot, "TranslationDraft.swift"),
     "utf8",
   );
   const forbiddenTokenList = [
@@ -383,15 +371,15 @@ function verifyInputLatencyContract() {
 // 剪贴板和键盘确认文本都必须先进入输入法内部 marked draft，再由用户一次性提交。
 function verifyClipboardOnlyTranslationContract() {
   const controllerSource = readFileSync(
-    join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "InputMethodController.swift"),
+    join(sourceRoot, "InputMethodController.swift"),
     "utf8",
   );
   const draftSource = readFileSync(
-    join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "TranslationDraft.swift"),
+    join(sourceRoot, "TranslationDraft.swift"),
     "utf8",
   );
   const mainSource = readFileSync(
-    join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "main.swift"),
+    join(sourceRoot, "main.swift"),
     "utf8",
   );
   const clipboardBody = swiftMethodBody(
@@ -500,7 +488,7 @@ function verifyClipboardOnlyTranslationContract() {
 // Esc 清理当前 Rime 组合、请求和浮层，但必须保留输入法内部 marked draft。
 function verifyEscapeClearContract() {
   const controllerSource = readFileSync(
-    join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "InputMethodController.swift"),
+    join(sourceRoot, "InputMethodController.swift"),
     "utf8",
   );
   const handleBody = swiftMethodBody(controllerSource, "override func handle(_ event:");
@@ -549,7 +537,7 @@ function verifyEscapeClearContract() {
 // 首符号和拼音后的多选标点必须在候选 UI 刷新前直接确认，三个 IMK 入口共用同一处理链。
 function verifyDirectSymbolContract() {
   const controllerSource = readFileSync(
-    join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "InputMethodController.swift"),
+    join(sourceRoot, "InputMethodController.swift"),
     "utf8",
   );
   const handleBody = swiftMethodBody(controllerSource, "override func handle(_ event:");
@@ -582,7 +570,7 @@ function verifyDirectSymbolContract() {
 // Rime 未处理的空格和可打印字符必须进入内部草稿，未知动作先上屏原文再交还宿主。
 function verifyKnownPassThroughContract() {
   const controllerSource = readFileSync(
-    join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "InputMethodController.swift"),
+    join(sourceRoot, "InputMethodController.swift"),
     "utf8",
   );
   const handleBody = swiftMethodBody(
@@ -610,13 +598,13 @@ function verifyKnownPassThroughContract() {
 
 // 客户端不再声明辅助功能用途，设置页和命令行也不得继续请求系统隐私权限。
 function verifyNoExternalPermissionContract() {
-  const infoSource = readFileSync(join(projectRoot, "Info.plist"), "utf8");
+  const infoSource = readFileSync(macOSInfoPath, "utf8");
   const mainSource = readFileSync(
-    join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "main.swift"),
+    join(sourceRoot, "main.swift"),
     "utf8",
   );
   const settingsWindowSource = readFileSync(
-    join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "InputMethodSettingsWindow.swift"),
+    join(sourceRoot, "InputMethodSettingsWindow.swift"),
     "utf8",
   );
   const buildSource = readFileSync(
@@ -646,41 +634,29 @@ function verifyNoExternalPermissionContract() {
 // 候选条只能有一个真实设置按钮，点击后由统一 AppKit 生命周期打开唯一设置窗口。
 function verifyCandidateSettingsContract() {
   const candidateSource = readFileSync(
-    join(
-      projectRoot,
-      "Sources",
-      "TypingDongnanyaInputMethod",
+    join(sourceRoot,
       "CandidateOverlay.swift",
     ),
     "utf8",
   );
   const mainSource = readFileSync(
-    join(projectRoot, "Sources", "TypingDongnanyaInputMethod", "main.swift"),
+    join(sourceRoot, "main.swift"),
     "utf8",
   );
   const settingsSource = readFileSync(
-    join(
-      projectRoot,
-      "Sources",
-      "TypingDongnanyaInputMethod",
+    join(sourceRoot,
       "InputMethodSettingsWindow.swift",
     ),
     "utf8",
   );
   const inputModeStatusSource = readFileSync(
-    join(
-      projectRoot,
-      "Sources",
-      "TypingDongnanyaInputMethod",
+    join(sourceRoot,
       "InputModeStatusOverlay.swift",
     ),
     "utf8",
   );
   const controllerSource = readFileSync(
-    join(
-      projectRoot,
-      "Sources",
-      "TypingDongnanyaInputMethod",
+    join(sourceRoot,
       "InputMethodController.swift",
     ),
     "utf8",
@@ -697,11 +673,24 @@ function verifyCandidateSettingsContract() {
     throw new Error("输入法进程必须由统一 AppKit delegate 管理设置窗口生命周期");
   }
   if (
+    !settingsSource.includes("拼音方案") ||
+    !settingsSource.includes("schemaPopUpButton") ||
+    !settingsSource.includes("schemaHandler") ||
     !settingsSource.includes("字符宽度") ||
     !settingsSource.includes("标点样式") ||
     !settingsSource.includes("Shift + Space")
   ) {
     throw new Error("设置页必须把半/全角、标点样式和快捷切换分开说明");
+  }
+  const appearanceRefreshCount = settingsSource.split("override func viewDidChangeEffectiveAppearance()").length - 1;
+  const appearanceResolutionCount = settingsSource.split("performAsCurrentDrawingAppearance").length - 1;
+  if (
+    !settingsSource.includes("let rootView = SettingsRootView()") ||
+    !settingsSource.includes("label.textColor = .labelColor") ||
+    appearanceRefreshCount < 3 ||
+    appearanceResolutionCount < 3
+  ) {
+    throw new Error("设置页背景、卡片和侧栏必须与原生控件使用同一套动态明暗外观");
   }
   if (
     !candidateSource.includes("CandidateBarTrailingLayout") ||
@@ -753,7 +742,7 @@ function swiftMethodBody(source: string, signature: string) {
 }
 
 function verifyBundledTranslationEndpoint() {
-  const sourceInfoPath = join(projectRoot, "Info.plist");
+  const sourceInfoPath = macOSInfoPath;
   const bundleInfoPath = join(
     buildRoot,
     "TypingDongnanya.app",
@@ -836,6 +825,43 @@ function verifyBundledTranslationEndpoint() {
   }
 }
 
+// 商业构建只能包含项目自有和已核实宽松许可证的 Rime 数据，禁止旧 LGPL 词典重新混入。
+function verifyCommercialRimeDataContract() {
+  const rimeDataDirectory = join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", "RimeData");
+  const bundledFileNameList = readdirSync(rimeDataDirectory);
+  const requiredFileNameList = [
+    "default.yaml",
+    "typing_pinyin.schema.yaml",
+    "typing_pinyin.dict.yaml",
+    "typing_double_pinyin_natural.schema.yaml",
+    "typing_double_pinyin_flypy.schema.yaml",
+    "typing_pinyin_t9.schema.yaml",
+    "typing_wubi86.schema.yaml",
+    "typing_wubi86.dict.yaml",
+    "aosp-pinyinime.NOTICE",
+    "aosp-pinyinime.SOURCE.json",
+    "wubimb.LICENSE",
+    "wubimb.SOURCE.json",
+  ];
+  for (const requiredFileName of requiredFileNameList) {
+    if (!bundledFileNameList.includes(requiredFileName)) {
+      throw new Error(`macOS 输入法包缺少商用 Rime 数据或来源声明：${requiredFileName}`);
+    }
+  }
+  const forbiddenIdentifierList = ["luna_pinyin", "rime-prelude", "rime-luna-pinyin", "rime-essay", "essay.txt"];
+  for (const fileName of bundledFileNameList) {
+    const lowerFileName = fileName.toLowerCase();
+    if (forbiddenIdentifierList.some((identifierText) => lowerFileName.includes(identifierText))) {
+      throw new Error(`macOS 输入法包混入禁止交付的旧 Rime 数据：${fileName}`);
+    }
+    if (!fileName.endsWith(".yaml") && !fileName.endsWith(".json")) continue;
+    const fileText = readFileSync(join(rimeDataDirectory, fileName), "utf8");
+    if (forbiddenIdentifierList.some((identifierText) => fileText.includes(identifierText))) {
+      throw new Error(`macOS 输入法包配置仍引用禁止交付的旧 Rime 数据：${fileName}`);
+    }
+  }
+}
+
 // 本地测试包使用稳定的显式 designated requirement，避免每次 ad-hoc 构建都生成新的 TCC 身份。
 function verifyStableDevelopmentCodeRequirement() {
   const appPath = join(buildRoot, "TypingDongnanya.app");
@@ -859,10 +885,7 @@ function verifyStableDevelopmentCodeRequirement() {
 // 通用模型不得把重复句当成冗余内容压缩，翻译提示必须明确保持句数、顺序和重复次数。
 function verifyTranslationPromptContract() {
   const translationServiceSource = readFileSync(
-    join(
-      projectRoot,
-      "Sources",
-      "TypingDongnanyaInputMethod",
+    join(sourceRoot,
       "TranslationService.swift",
     ),
     "utf8",

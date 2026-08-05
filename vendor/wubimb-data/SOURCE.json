@@ -1,0 +1,12 @@
+{
+  "project": "tenfyzhong/wubimb",
+  "repository": "https://github.com/tenfyzhong/wubimb",
+  "commit": "afba8da77234920d10ccf0c94bfc7897861f3543",
+  "dataCommit": "198c11625482c5bab34fb19128a872851f9b86ed",
+  "sourceFile": "wubi86.txt",
+  "sourceSha256": "9fca2e8eb1b19263a09dcf54bc94de128902b4d3596ed64a305178ae910c63c8",
+  "licenseSha256": "8a7549dae78142b072bbfbb31aaf8d8e7cbaa71257a592e2b67729d90aebf127",
+  "license": "MIT",
+  "provenance": "The repository added the table after its MIT LICENSE and contains no contrary upstream attribution; production legal review is still recommended.",
+  "retrievedAt": "2026-08-05"
+}

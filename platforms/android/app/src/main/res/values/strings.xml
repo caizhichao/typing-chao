@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Typing 东南亚</string>
+    <string name="input_method_subtype">简体拼音 · 边写边译</string>
+    <string name="settings_title">Typing 东南亚设置</string>
+</resources>

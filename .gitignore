@@ -11,3 +11,8 @@ vendor/librime/bin/
 vendor/librime/share/
 server/typing-dongnanya-api/target/
 server/typing-dongnanya-api/build/
+.gradle/
+.idea/
+local.properties
+.cxx/
+platforms/android/.kotlin/

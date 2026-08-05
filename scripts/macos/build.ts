@@ -1,14 +1,19 @@
 #!/usr/bin/env bun
 
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const projectRoot = resolve(import.meta.dir, "../..");
-const sourceRoot = join(projectRoot, "Sources", "TypingDongnanyaInputMethod");
+const macOSRoot = join(projectRoot, "platforms", "macos");
+const sourceRoot = join(macOSRoot, "Sources", "TypingDongnanyaInputMethod");
+const sourceResourcesRoot = join(macOSRoot, "Resources");
+const macOSRimeDataRoot = join(sourceResourcesRoot, "RimeData");
+const sharedRimeDataRoot = join(projectRoot, "shared", "RimeData");
+const sourceInfoPath = join(macOSRoot, "Info.plist");
 const vendorRoot = join(projectRoot, "vendor", "librime");
-const buildRoot = join(projectRoot, "build");
+const buildRoot = join(macOSRoot, "build");
 const appRoot = join(buildRoot, "TypingDongnanya.app");
 const contentsRoot = join(appRoot, "Contents");
 const resourcesRoot = join(contentsRoot, "Resources");
@@ -34,6 +39,8 @@ if (!existsSync(librimeLibrary)) {
   run("make", ["librime-static", `BOOST_ROOT=${boostRoot}`], vendorRoot);
 }
 
+run("bun", ["run", "scripts/rime/generate-aosp-pinyin-dictionary.ts"], projectRoot);
+run("bun", ["run", "scripts/rime/generate-wubi86-dictionary.ts"], projectRoot);
 copyRimeData();
 
 const bridgeObject = join(buildRoot, "obj", "RimeBridge.o");
@@ -110,33 +117,32 @@ chmodSync(executablePath, 0o755);
 console.log(`已构建隔离输入法包：${appRoot}`);
 
 function copyRimeData() {
-  cpSync(join(projectRoot, "Resources", "TypingDongnanyaAppIcon.pdf"), join(resourcesRoot, "TypingDongnanyaAppIcon.pdf"));
-  cpSync(join(projectRoot, "Resources", "TypingDongnanyaAppIcon.icns"), join(resourcesRoot, "TypingDongnanyaAppIcon.icns"));
-  cpSync(join(projectRoot, "Resources", "TypingDongnanyaMenuIconV4.pdf"), join(resourcesRoot, "TypingDongnanyaMenuIconV4.pdf"));
+  cpSync(join(sourceResourcesRoot, "TypingDongnanyaAppIcon.pdf"), join(resourcesRoot, "TypingDongnanyaAppIcon.pdf"));
+  cpSync(join(sourceResourcesRoot, "TypingDongnanyaAppIcon.icns"), join(resourcesRoot, "TypingDongnanyaAppIcon.icns"));
+  cpSync(join(sourceResourcesRoot, "TypingDongnanyaMenuIconV4.pdf"), join(resourcesRoot, "TypingDongnanyaMenuIconV4.pdf"));
   for (const localizationName of ["en.lproj", "zh-Hans.lproj", "zh_CN.lproj"]) {
-    cpSync(join(projectRoot, "Resources", localizationName), join(resourcesRoot, localizationName), { recursive: true });
+    cpSync(join(sourceResourcesRoot, localizationName), join(resourcesRoot, localizationName), { recursive: true });
   }
-  const preludeRoot = join(projectRoot, "vendor", "rime-prelude");
-  const lunaRoot = join(projectRoot, "vendor", "rime-luna-pinyin");
-  for (const sourcePath of [preludeRoot, lunaRoot]) {
-    for (const fileName of readdir(sourcePath)) {
-      if (!fileName.endsWith(".yaml") && !fileName.endsWith(".dict.yaml")) continue;
-      cpSync(join(sourcePath, fileName), join(rimeDataRoot, fileName));
+  mkdirSync(rimeDataRoot, { recursive: true });
+  for (const fileName of readdirSync(sharedRimeDataRoot)) {
+    cpSync(join(sharedRimeDataRoot, fileName), join(rimeDataRoot, fileName), { recursive: true });
+  }
+  if (existsSync(macOSRimeDataRoot)) {
+    for (const fileName of readdirSync(macOSRimeDataRoot)) {
+      cpSync(join(macOSRimeDataRoot, fileName), join(rimeDataRoot, fileName), { recursive: true });
     }
   }
-  for (const fileName of ["default.custom.yaml", "luna_pinyin.custom.yaml", "rime-data-version.txt"]) {
-    cpSync(join(projectRoot, "Resources", "RimeData", fileName), join(rimeDataRoot, fileName));
-  }
-  cpSync(join(preludeRoot, "LICENSE"), join(rimeDataRoot, "rime-prelude.LICENSE"));
-  cpSync(join(lunaRoot, "LICENSE"), join(rimeDataRoot, "rime-luna-pinyin.LICENSE"));
-  const essayRoot = join(projectRoot, "vendor", "rime-essay");
-  cpSync(join(essayRoot, "essay.txt"), join(rimeDataRoot, "essay.txt"));
-  cpSync(join(essayRoot, "LICENSE"), join(rimeDataRoot, "rime-essay.LICENSE"));
+  const aospPinyinDataRoot = join(projectRoot, "vendor", "aosp-pinyinime-data");
+  cpSync(join(aospPinyinDataRoot, "NOTICE"), join(rimeDataRoot, "aosp-pinyinime.NOTICE"));
+  cpSync(join(aospPinyinDataRoot, "SOURCE.json"), join(rimeDataRoot, "aosp-pinyinime.SOURCE.json"));
+  const wubiDataRoot = join(projectRoot, "vendor", "wubimb-data");
+  cpSync(join(wubiDataRoot, "LICENSE"), join(rimeDataRoot, "wubimb.LICENSE"));
+  cpSync(join(wubiDataRoot, "SOURCE.json"), join(rimeDataRoot, "wubimb.SOURCE.json"));
 }
 
 // 将服务器部署时生成的受限路径 capability 写入包内，桌面端绝不保存上游 AI Key。
 function writeBundledInfoPlist() {
-  const sourceInfoText = readFileSync(join(projectRoot, "Info.plist"), "utf8");
+  const sourceInfoText = readFileSync(sourceInfoPath, "utf8");
   const baseEndpointMatch = sourceInfoText.match(
     /<key>TypingDongnanyaAPIBaseEndpoint<\/key>\s*<string>([^<]+)<\/string>/
   );

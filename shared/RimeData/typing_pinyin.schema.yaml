@@ -1,0 +1,144 @@
+# Rime schema
+# encoding: utf-8
+
+# 本项目独立维护全拼方案；词条由 Apache-2.0 的 AOSP PinyinIME 原始数据确定性生成。
+schema:
+  schema_id: typing_pinyin
+  name: 全拼
+  version: "1.0"
+  author:
+    - Typing Dongnanya
+  description: |
+    面向简体中文输入的项目自有全拼方案，不依赖 GPL/LGPL 输入方案或词典。
+
+ascii_composer:
+  good_old_caps_lock: true
+  switch_key:
+    Caps_Lock: clear
+    Shift_L: noop
+    Shift_R: noop
+    Control_L: noop
+    Control_R: noop
+
+switches:
+  - name: ascii_mode
+    reset: 0
+    states: [中文, 西文]
+  - name: full_shape
+    reset: 0
+    states: [半角, 全角]
+  - name: ascii_punct
+    reset: 0
+    states: [中文标点, 西文标点]
+  - name: zh_hant
+    reset: 0
+    states: [简体, 繁体]
+
+engine:
+  processors:
+    - ascii_composer
+    - key_binder
+    - speller
+    - punctuator
+    - selector
+    - navigator
+    - express_editor
+  segmentors:
+    - ascii_segmentor
+    - abc_segmentor
+    - punct_segmentor
+    - fallback_segmentor
+  translators:
+    - punct_translator
+    - script_translator
+  filters:
+    - simplifier@traditionalize
+    - uniquifier
+
+speller:
+  alphabet: zyxwvutsrqponmlkjihgfedcba
+  delimiter: " '"
+
+translator:
+  dictionary: typing_pinyin
+  prism: typing_pinyin
+  enable_sentence: true
+  enable_user_dict: true
+
+traditionalize:
+  option_name: zh_hant
+  opencc_config: s2t.json
+  tips: none
+
+key_binder:
+  bindings:
+    - { when: always, accept: Shift+space, toggle: full_shape }
+    - { when: always, accept: Control+period, toggle: ascii_punct }
+
+punctuator:
+  half_shape:
+    ",": "，"
+    ".": "。"
+    "<": "《"
+    ">": "》"
+    "/": ["/", "、"]
+    "?": "？"
+    ";": "；"
+    ":": "："
+    "'": ["‘", "’"]
+    '"': ["“", "”"]
+    "\\": "、"
+    "|": "｜"
+    "`": "·"
+    "~": "～"
+    "!": "！"
+    "@": "@"
+    "#": "#"
+    "$": "￥"
+    "%": "%"
+    "^": "……"
+    "&": "&"
+    "*": "*"
+    "(": "（"
+    ")": "）"
+    "-": "-"
+    "_": "——"
+    "+": "+"
+    "=": "="
+    "[": "【"
+    "]": "】"
+    "{": "「"
+    "}": "」"
+  full_shape:
+    ",": "，"
+    ".": "。"
+    "<": "《"
+    ">": "》"
+    "/": ["／", "、"]
+    "?": "？"
+    ";": "；"
+    ":": "："
+    "'": ["‘", "’"]
+    '"': ["“", "”"]
+    "\\": "＼"
+    "|": "｜"
+    "`": "｀"
+    "~": "～"
+    "!": "！"
+    "@": "＠"
+    "#": "＃"
+    "$": "￥"
+    "%": "％"
+    "^": "……"
+    "&": "＆"
+    "*": "＊"
+    "(": "（"
+    ")": "）"
+    "-": "－"
+    "_": "——"
+    "+": "＋"
+    "=": "＝"
+    "[": "【"
+    "]": "】"
+    "{": "「"
+    "}": "」"
