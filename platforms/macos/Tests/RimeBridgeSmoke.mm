@@ -82,6 +82,25 @@ int main(int argc, const char* argv[]) {
       return 11;
     }
 
+    [session processKey:@"s" modifiers:@[]];
+    [session processKey:@"h" modifiers:@[]];
+    NSDictionary<NSString*, id>* firstPageSnapshot = [session processKey:@"i" modifiers:@[]];
+    if ([firstPageSnapshot[@"isLastPage"] boolValue] ||
+        [firstPageSnapshot[@"pageNumber"] integerValue] != 0) {
+      return 35;
+    }
+    NSDictionary<NSString*, id>* nextPageSnapshot = [session changePageBackward:NO];
+    if (![nextPageSnapshot[@"handled"] boolValue] ||
+        [nextPageSnapshot[@"pageNumber"] integerValue] != 1) {
+      return 36;
+    }
+    NSDictionary<NSString*, id>* previousPageSnapshot = [session changePageBackward:YES];
+    if (![previousPageSnapshot[@"handled"] boolValue] ||
+        [previousPageSnapshot[@"pageNumber"] integerValue] != 0) {
+      return 37;
+    }
+    [session clearComposition];
+
     NSDictionary<NSString*, id>* escapePreparationSnapshot = [session processKey:@"n" modifiers:@[]];
     if (![escapePreparationSnapshot[@"handled"] boolValue]) {
       return 17;
@@ -236,7 +255,7 @@ int main(int argc, const char* argv[]) {
         [chinesePunctuationSnapshot[@"isAsciiPunctuation"] boolValue]) {
       return 16;
     }
-    printf("Rime bridge smoke test passed: full/double/T9/Wubi schema selection, direct text, Escape composition clear, Backspace composition editing, Return raw commit, punctuation commit, direct symbol selection, explicit commit, option, Shift-Space width, and Control-Period punctuation toggles\n");
+    printf("Rime bridge smoke test passed: full/double/T9/Wubi schema selection, direct text, real candidate paging, Escape composition clear, Backspace composition editing, Return raw commit, punctuation commit, direct symbol selection, explicit commit, option, Shift-Space width, and Control-Period punctuation toggles\n");
   }
   return 0;
 }

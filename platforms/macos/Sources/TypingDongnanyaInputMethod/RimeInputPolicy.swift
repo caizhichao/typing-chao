@@ -4,6 +4,14 @@ import Foundation
 enum RimeInputPolicy {
     private static let pinyinDelimiterKeyName = "'"
 
+    // macOS ANSI 虚拟键码只用于补全 InputMethodKit 无文本回调中的候选翻页键。
+    private enum CandidatePagingKeyCode {
+        static let ansiEqual = 0x18 // 主键盘等号/加号键
+        static let ansiMinus = 0x1B // 主键盘减号键
+        static let keypadPlus = 0x45 // 数字键盘加号键
+        static let keypadMinus = 0x4E // 数字键盘减号键
+    }
+
     // 候选翻页键与浮层箭头共用同一页状态：减号回上一页，等号/加号进下一页。
     static func candidatePageBackward(
         keyName: String,
@@ -13,13 +21,38 @@ enum RimeInputPolicy {
               !snapshot.candidateList.isEmpty else {
             return nil
         }
-        if keyName == "-", snapshot.pageNumber > 0 {
+        let normalizedKeyName = keyName.lowercased()
+        if (normalizedKeyName == "-" ||
+            normalizedKeyName == "minus" ||
+            normalizedKeyName == "kp_subtract"),
+           snapshot.pageNumber > 0 {
             return true
         }
-        if (keyName == "=" || keyName == "+"), !snapshot.isLastPage {
+        if (normalizedKeyName == "=" ||
+            normalizedKeyName == "+" ||
+            normalizedKeyName == "equal" ||
+            normalizedKeyName == "plus" ||
+            normalizedKeyName == "kp_add"),
+           !snapshot.isLastPage {
             return false
         }
         return nil
+    }
+
+    // 带键码入口没有 printable string 时仍把主键盘和数字键盘的加减号恢复成翻页键。
+    static func candidatePagingKeyName(forPhysicalKeyCode keyCode: Int) -> String? {
+        switch keyCode {
+        case CandidatePagingKeyCode.ansiEqual:
+            return "="
+        case CandidatePagingKeyCode.ansiMinus:
+            return "-"
+        case CandidatePagingKeyCode.keypadPlus:
+            return "+"
+        case CandidatePagingKeyCode.keypadMinus:
+            return "-"
+        default:
+            return nil
+        }
     }
 
     static func directSymbolCandidateIndex(

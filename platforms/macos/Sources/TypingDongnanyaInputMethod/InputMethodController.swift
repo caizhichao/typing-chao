@@ -1181,6 +1181,11 @@ final class TypingDongnanyaInputController: IMKInputController {
     }
 
     private func keyName(for keyCode: Int) -> String {
+        if let pagingKeyName = RimeInputPolicy.candidatePagingKeyName(
+            forPhysicalKeyCode: keyCode
+        ) {
+            return pagingKeyName
+        }
         switch keyCode {
         case 36: return "Return"
         case 76: return "Return"
