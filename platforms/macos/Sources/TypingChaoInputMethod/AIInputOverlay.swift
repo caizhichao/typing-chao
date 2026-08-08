@@ -2,7 +2,7 @@ import AppKit
 
 // 提供一次性 AI 输入面板：键盘仍留在原 IMK 会话，避免面板文本控件建立嵌套输入会话。
 final class AIInputOverlay {
-    private static let panelSize = NSSize(width: 440, height: 310)
+    private static let panelSize = NSSize(width: 420, height: 286)
     private let panel: AIInputOverlayPanel
     private let contentView: AIInputOverlayContentView
     private var requestHandler: ((String) -> Void)?
@@ -46,6 +46,11 @@ final class AIInputOverlay {
         contentView.acceptsPromptInput
     }
 
+    // 上次请求已返回结果时允许用 Command-Return 上屏，避免必须回到鼠标按钮。
+    var canCommitResult: Bool {
+        contentView.canCommitResult
+    }
+
     func setRequestHandler(_ handler: @escaping (String) -> Void) {
         requestHandler = handler
     }
@@ -86,6 +91,11 @@ final class AIInputOverlay {
         contentView.submitPrompt()
     }
 
+    // 键盘快捷键与面板按钮共用同一结果提交入口。
+    func commitResult() {
+        contentView.commitResult()
+    }
+
     func showLoading() {
         contentView.showLoading()
     }
@@ -123,8 +133,12 @@ private final class AIInputOverlayContentView: NSView {
     private var promptText = ""
     private var promptComposition = ""
     private var isPromptInputEnabled = true
+    private var hasResult = false
     private let promptContainer = NSView(frame: .zero)
     private let promptLabel = NSTextField(labelWithString: "")
+    private let promptCaptionLabel = NSTextField(labelWithString: "输入")
+    private let resultContainer = NSView(frame: .zero)
+    private let resultCaptionLabel = NSTextField(labelWithString: "AI 结果")
     private let resultTextView = NSTextView(frame: .zero)
     private let statusLabel = NSTextField(labelWithString: "按 Enter 发送 · Esc 关闭")
     private let sendButton = NSButton(title: "发送", target: nil, action: nil)
@@ -134,6 +148,10 @@ private final class AIInputOverlayContentView: NSView {
 
     var acceptsPromptInput: Bool {
         isPromptInputEnabled
+    }
+
+    var canCommitResult: Bool {
+        hasResult && !resultTextView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     override init(frame frameRect: NSRect) {
@@ -149,11 +167,12 @@ private final class AIInputOverlayContentView: NSView {
         promptText = ""
         promptComposition = ""
         isPromptInputEnabled = true
+        hasResult = false
         updatePromptDisplay()
         sendButton.isEnabled = true
-        resultTextView.string = "AI 输出会显示在这里"
-        resultTextView.textColor = NSColor(calibratedWhite: 1, alpha: 0.38)
-        statusLabel.stringValue = "按 Enter 发送 · Esc 关闭"
+        resultTextView.string = "发送后显示结果"
+        resultTextView.textColor = NSColor(calibratedWhite: 1, alpha: 0.48)
+        statusLabel.stringValue = "Enter 发送 · Esc 关闭"
         commitButton.isHidden = true
     }
 
@@ -191,9 +210,10 @@ private final class AIInputOverlayContentView: NSView {
         isPromptInputEnabled = false
         sendButton.isEnabled = false
         updatePromptDisplay()
+        hasResult = false
         resultTextView.string = ""
         resultTextView.textColor = NSColor(calibratedWhite: 1, alpha: 0.60)
-        statusLabel.stringValue = "正在请求 AI…"
+        statusLabel.stringValue = "正在生成… · Esc 关闭"
         commitButton.isHidden = true
     }
 
@@ -201,9 +221,10 @@ private final class AIInputOverlayContentView: NSView {
         isPromptInputEnabled = true
         sendButton.isEnabled = true
         updatePromptDisplay()
+        hasResult = true
         resultTextView.string = resultText
         resultTextView.textColor = NSColor(calibratedWhite: 1, alpha: 0.92)
-        statusLabel.stringValue = "本次请求已完成，不保留对话历史"
+        statusLabel.stringValue = "⌘Enter 上屏 · Enter 重试 · Esc 关闭"
         commitButton.isHidden = false
     }
 
@@ -211,9 +232,10 @@ private final class AIInputOverlayContentView: NSView {
         isPromptInputEnabled = true
         sendButton.isEnabled = true
         updatePromptDisplay()
+        hasResult = false
         resultTextView.string = messageText
         resultTextView.textColor = NSColor(calibratedRed: 1, green: 0.68, blue: 0.62, alpha: 0.92)
-        statusLabel.stringValue = "请求未完成，请修改内容后重试"
+        statusLabel.stringValue = "Enter 重试 · Esc 关闭"
         commitButton.isHidden = true
     }
 
@@ -222,8 +244,13 @@ private final class AIInputOverlayContentView: NSView {
     }
 
     @objc private func commitAIInput() {
+        commitResult()
+    }
+
+    // 只有真实返回结果才允许上屏，避免把占位文案或错误文案写入宿主。
+    func commitResult() {
+        guard canCommitResult else { return }
         let resultText = resultTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !resultText.isEmpty else { return }
         commitHandler?(resultText)
     }
 
@@ -276,25 +303,44 @@ private final class AIInputOverlayContentView: NSView {
             visualEffectView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
+        let titleIconLabel = NSTextField(labelWithString: "✦")
+        titleIconLabel.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
+        titleIconLabel.textColor = NSColor(calibratedRed: 0.03, green: 0.68, blue: 0.59, alpha: 0.92)
         let titleLabel = NSTextField(labelWithString: "AI 输入")
-        titleLabel.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
+        titleLabel.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
         titleLabel.textColor = NSColor(calibratedWhite: 1, alpha: 0.94)
-
-        let subtitleLabel = NSTextField(labelWithString: "使用已设置快捷键打开 · 每次请求独立处理")
-        subtitleLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+        let subtitleLabel = NSTextField(labelWithString: "单轮处理 · 每次请求独立处理")
+        subtitleLabel.font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
         subtitleLabel.textColor = NSColor(calibratedWhite: 1, alpha: 0.48)
 
-        let titleStack = NSStackView(views: [titleLabel, subtitleLabel])
-        titleStack.orientation = .vertical
-        titleStack.alignment = .leading
-        titleStack.spacing = 3
+        let titleStack = NSStackView(views: [titleIconLabel, titleLabel, subtitleLabel])
+        titleStack.orientation = .horizontal
+        titleStack.alignment = .centerY
+        titleStack.spacing = 6
 
-        promptContainer.wantsLayer = true
-        promptContainer.layer?.cornerRadius = 6
-        promptContainer.layer?.borderWidth = 1
-        promptContainer.layer?.borderColor = NSColor.separatorColor.cgColor
-        promptContainer.layer?.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.58).cgColor
+        let shortcutLabel = NSTextField(labelWithString: "Enter 发送 · ⌘Enter 上屏 · Esc 关闭")
+        shortcutLabel.font = NSFont.monospacedSystemFont(ofSize: 9.5, weight: .regular)
+        shortcutLabel.textColor = NSColor(calibratedWhite: 1, alpha: 0.48)
+        shortcutLabel.alignment = .right
+        let titleSpacer = NSView(frame: .zero)
+        titleSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let headerStack = NSStackView(views: [titleStack, titleSpacer, shortcutLabel])
+        headerStack.orientation = .horizontal
+        headerStack.alignment = .centerY
+        headerStack.spacing = 8
+
+        styleCard(promptContainer)
+        styleCard(resultContainer)
         promptContainer.translatesAutoresizingMaskIntoConstraints = false
+        resultContainer.translatesAutoresizingMaskIntoConstraints = false
+
+        for captionLabel in [promptCaptionLabel, resultCaptionLabel] {
+            captionLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+            captionLabel.textColor = NSColor(calibratedWhite: 1, alpha: 0.48)
+            captionLabel.translatesAutoresizingMaskIntoConstraints = false
+        }
+        promptContainer.addSubview(promptCaptionLabel)
+        resultContainer.addSubview(resultCaptionLabel)
 
         promptLabel.font = NSFont.systemFont(ofSize: 14)
         promptLabel.lineBreakMode = .byTruncatingTail
@@ -302,45 +348,64 @@ private final class AIInputOverlayContentView: NSView {
         promptLabel.translatesAutoresizingMaskIntoConstraints = false
         promptContainer.addSubview(promptLabel)
         NSLayoutConstraint.activate([
-            promptLabel.leadingAnchor.constraint(equalTo: promptContainer.leadingAnchor, constant: 9),
-            promptLabel.trailingAnchor.constraint(equalTo: promptContainer.trailingAnchor, constant: -9),
-            promptLabel.centerYAnchor.constraint(equalTo: promptContainer.centerYAnchor),
+            promptCaptionLabel.leadingAnchor.constraint(equalTo: promptContainer.leadingAnchor, constant: 12),
+            promptCaptionLabel.topAnchor.constraint(equalTo: promptContainer.topAnchor, constant: 7),
+            promptLabel.leadingAnchor.constraint(equalTo: promptContainer.leadingAnchor, constant: 12),
+            promptLabel.trailingAnchor.constraint(equalTo: promptContainer.trailingAnchor, constant: -12),
+            promptLabel.topAnchor.constraint(equalTo: promptCaptionLabel.bottomAnchor, constant: 1),
+            promptLabel.bottomAnchor.constraint(equalTo: promptContainer.bottomAnchor, constant: -7),
         ])
 
         resultTextView.isEditable = false
         resultTextView.isSelectable = true
         resultTextView.drawsBackground = false
         resultTextView.font = NSFont.systemFont(ofSize: 13)
-        resultTextView.textContainerInset = NSSize(width: 8, height: 8)
+        resultTextView.textContainerInset = .zero
+        resultTextView.textContainer?.lineFragmentPadding = 0
         resultTextView.translatesAutoresizingMaskIntoConstraints = false
         resultScrollView.documentView = resultTextView
         resultScrollView.hasVerticalScroller = true
-        resultScrollView.borderType = .bezelBorder
+        resultScrollView.scrollerStyle = .overlay
+        resultScrollView.borderType = .noBorder
+        resultScrollView.drawsBackground = false
         resultScrollView.translatesAutoresizingMaskIntoConstraints = false
+        resultContainer.addSubview(resultScrollView)
+        NSLayoutConstraint.activate([
+            resultCaptionLabel.leadingAnchor.constraint(equalTo: resultContainer.leadingAnchor, constant: 12),
+            resultCaptionLabel.topAnchor.constraint(equalTo: resultContainer.topAnchor, constant: 7),
+            resultScrollView.leadingAnchor.constraint(equalTo: resultContainer.leadingAnchor, constant: 12),
+            resultScrollView.trailingAnchor.constraint(equalTo: resultContainer.trailingAnchor, constant: -10),
+            resultScrollView.topAnchor.constraint(equalTo: resultCaptionLabel.bottomAnchor, constant: 2),
+            resultScrollView.bottomAnchor.constraint(equalTo: resultContainer.bottomAnchor, constant: -8),
+        ])
 
         statusLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
         statusLabel.textColor = NSColor(calibratedWhite: 1, alpha: 0.48)
         statusLabel.lineBreakMode = .byTruncatingTail
 
         closeButton.bezelStyle = .rounded
+        closeButton.controlSize = .small
         closeButton.target = self
         closeButton.action = #selector(closeAIInput)
         sendButton.bezelStyle = .rounded
+        sendButton.controlSize = .small
         sendButton.target = self
         sendButton.action = #selector(requestAIInput)
         commitButton.bezelStyle = .rounded
+        commitButton.controlSize = .small
+        commitButton.contentTintColor = .white
         commitButton.target = self
         commitButton.action = #selector(commitAIInput)
 
         let buttonSpacer = NSView(frame: .zero)
         buttonSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttonStack = NSStackView(views: [buttonSpacer, closeButton, commitButton, sendButton])
+        let buttonStack = NSStackView(views: [buttonSpacer, closeButton, sendButton, commitButton])
         buttonStack.orientation = .horizontal
         buttonStack.alignment = .centerY
         buttonStack.spacing = 8
         buttonStack.distribution = .fill
 
-        let pageStack = NSStackView(views: [titleStack, promptContainer, resultScrollView, statusLabel, buttonStack])
+        let pageStack = NSStackView(views: [headerStack, promptContainer, resultContainer, statusLabel, buttonStack])
         pageStack.orientation = .vertical
         pageStack.alignment = .leading
         pageStack.spacing = 10
@@ -351,14 +416,25 @@ private final class AIInputOverlayContentView: NSView {
             pageStack.trailingAnchor.constraint(equalTo: visualEffectView.trailingAnchor, constant: -16),
             pageStack.topAnchor.constraint(equalTo: visualEffectView.topAnchor, constant: 14),
             pageStack.bottomAnchor.constraint(equalTo: visualEffectView.bottomAnchor, constant: -14),
+            headerStack.widthAnchor.constraint(equalTo: pageStack.widthAnchor),
             promptContainer.widthAnchor.constraint(equalTo: pageStack.widthAnchor),
-            resultScrollView.widthAnchor.constraint(equalTo: pageStack.widthAnchor),
+            resultContainer.widthAnchor.constraint(equalTo: pageStack.widthAnchor),
             statusLabel.widthAnchor.constraint(equalTo: pageStack.widthAnchor),
             buttonStack.widthAnchor.constraint(equalTo: pageStack.widthAnchor),
-            promptContainer.heightAnchor.constraint(equalToConstant: 30),
-            resultScrollView.heightAnchor.constraint(equalToConstant: 112),
+            promptContainer.heightAnchor.constraint(equalToConstant: 48),
+            resultContainer.heightAnchor.constraint(equalToConstant: 108),
             buttonStack.heightAnchor.constraint(equalToConstant: 28),
         ])
         reset()
+    }
+
+    // 让输入卡和结果卡沿用候选条的描边、圆角和轻玻璃层次。
+    private func styleCard(_ cardView: NSView) {
+        cardView.wantsLayer = true
+        cardView.layer?.cornerRadius = 9
+        cardView.layer?.masksToBounds = true
+        cardView.layer?.borderWidth = 1
+        cardView.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.16).cgColor
+        cardView.layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.055).cgColor
     }
 }

@@ -913,6 +913,8 @@ function verifyAIInputContract() {
     "updateAIInputOverlay(client: client, snapshot: snapshot)",
     "aiInputOverlay.acceptsPromptInput",
     "aiInputOverlay.submitPrompt()",
+    "aiInputOverlay.canCommitResult",
+    "aiInputOverlay.commitResult()",
   ]) {
     if (!controllerSource.includes(requiredContract)) {
       throw new Error("macOS AI 输入缺少内部入口或单轮收口契约：" + requiredContract);
@@ -959,6 +961,8 @@ function verifyAIInputContract() {
     !overlaySource.includes("panel.orderFrontRegardless()") ||
     !overlaySource.includes("override var canBecomeKey") ||
     !overlaySource.includes("每次请求独立处理") ||
+    !overlaySource.includes("⌘Enter 上屏") ||
+    !overlaySource.includes("func commitResult()") ||
     !translationServiceSource.includes("不包含任何历史对话")
   ) {
     throw new Error("AI 输入必须保持单次请求，并且不能抢占原宿主 IMK 会话");

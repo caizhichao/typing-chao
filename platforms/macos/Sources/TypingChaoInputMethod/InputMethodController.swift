@@ -1209,7 +1209,7 @@ final class TypingChaoInputController: IMKInputController {
         }
     }
 
-    // AI 面板保持原宿主焦点，按键继续由当前 IMK 会话和同一份 Rime 快照处理。
+    // AI 面板保持原宿主焦点，并用 Enter、Command-Enter、Escape 收口主要操作，减少鼠标依赖。
     private func handleAIInputKey(
         event: NSEvent,
         keyName: String,
@@ -1225,6 +1225,10 @@ final class TypingChaoInputController: IMKInputController {
         }
         guard aiInputOverlay.acceptsPromptInput else { return true }
         if event.modifierFlags.contains(.command) {
+            if keyName == "Return", aiInputOverlay.canCommitResult {
+                aiInputOverlay.commitResult()
+                return true
+            }
             if event.charactersIgnoringModifiers?.lowercased() == "v",
                let pastedText = NSPasteboard.general.string(forType: .string),
                !pastedText.isEmpty {
