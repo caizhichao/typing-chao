@@ -8,10 +8,10 @@ import { spawnSync } from "node:child_process";
 
 const projectRoot = resolve(import.meta.dir, "../..");
 const pdfPath = resolve(
-  process.argv[2] ?? `${projectRoot}/platforms/macos/Resources/TypingDongnanyaAppIcon.pdf`,
+  process.argv[2] ?? `${projectRoot}/platforms/macos/Resources/TypingChaoAppIcon.pdf`,
 );
 const icnsPath = resolve(
-  process.argv[3] ?? `${projectRoot}/platforms/macos/Resources/TypingDongnanyaAppIcon.icns`,
+  process.argv[3] ?? `${projectRoot}/platforms/macos/Resources/TypingChaoAppIcon.icns`,
 );
 
 // 注册页图标采用独立彩色应用图标；菜单仍使用透明单色模板，二者不可再复用同一资源。
@@ -71,7 +71,7 @@ const objectList = [
   `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}endstream`,
 ];
 
-let pdf = "%PDF-1.4\n% typing-dongnanya-app-icon-v1\n";
+let pdf = "%PDF-1.4\n% typingchao-app-icon-v1\n";
 const offsetList = [0];
 for (const [index, object] of objectList.entries()) {
   offsetList.push(Buffer.byteLength(pdf));
@@ -90,8 +90,8 @@ mkdirSync(dirname(pdfPath), { recursive: true });
 mkdirSync(dirname(icnsPath), { recursive: true });
 writeFileSync(pdfPath, pdf);
 
-const temporaryRoot = mkdtempSync(join(tmpdir(), "typing-dongnanya-icon-"));
-const iconsetPath = join(temporaryRoot, "TypingDongnanyaAppIcon.iconset");
+const temporaryRoot = mkdtempSync(join(tmpdir(), "typingchao-icon-"));
+const iconsetPath = join(temporaryRoot, "TypingChaoAppIcon.iconset");
 mkdirSync(iconsetPath, { recursive: true });
 const iconSizeList = [
   [16, "icon_16x16.png"],

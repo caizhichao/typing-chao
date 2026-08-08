@@ -1,35 +1,43 @@
 #!/usr/bin/env bun
 
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const projectRoot = resolve(import.meta.dir, "../..");
 const macOSRoot = join(projectRoot, "platforms", "macos");
-const sourceRoot = join(macOSRoot, "Sources", "TypingDongnanyaInputMethod");
+const sourceRoot = join(macOSRoot, "Sources", "TypingChaoInputMethod");
 const sourceResourcesRoot = join(macOSRoot, "Resources");
 const macOSRimeDataRoot = join(sourceResourcesRoot, "RimeData");
 const sharedRimeDataRoot = join(projectRoot, "shared", "RimeData");
 const sourceInfoPath = join(macOSRoot, "Info.plist");
 const vendorRoot = join(projectRoot, "vendor", "librime");
 const buildRoot = join(macOSRoot, "build");
-const appRoot = join(buildRoot, "TypingDongnanya.app");
+const swiftModuleCacheRoot = join(tmpdir(), "typingchao-swift-module-cache");
+const appRoot = join(buildRoot, "TypingChao.app");
 const contentsRoot = join(appRoot, "Contents");
 const resourcesRoot = join(contentsRoot, "Resources");
 const rimeDataRoot = join(resourcesRoot, "RimeData");
-const executablePath = join(contentsRoot, "MacOS", "TypingDongnanya");
+const executablePath = join(contentsRoot, "MacOS", "TypingChao");
 const bundleInfoPath = join(contentsRoot, "Info.plist");
-const inputMethodBundleIdentifier = "com.caizhichao.typing-dongnanya.inputmethod.TypingDongnanya";
+const inputMethodBundleIdentifier = "com.caizhichao.typingchao.inputmethod.TypingChao";
 const localDesignatedRequirement = `=designated => identifier "${inputMethodBundleIdentifier}"`;
-const proxyAccessTokenPath = join(homedir(), ".config", "typing-dongnanya", "access-token");
-const proxyAccessToken = readProxyAccessToken();
-const sdkPath = runText("xcrun", ["--show-sdk-path"]);
+const defaultSDKPath = runText("xcrun", ["--show-sdk-path"]);
+const compatibleSDKPath = join(dirname(defaultSDKPath), "MacOSX15.4.sdk");
+// 当前 CLT 的 Swift 与 26.5 SDK 内部构建号不匹配，优先使用仍兼容 macOS 13 目标的本机 15.4 SDK。
+const sdkPath = existsSync(compatibleSDKPath) ? compatibleSDKPath : defaultSDKPath;
 const boostRoot = "/opt/homebrew/opt/boost";
 const architecture = runText("arch", []);
+// 本地调试默认关闭全模块优化，只有显式 release 构建才启用优化。
+let swiftOptimizationLevel = "-Onone";
+if (process.argv.includes("--release")) {
+  swiftOptimizationLevel = "-O";
+}
 
 rmSync(buildRoot, { recursive: true, force: true });
 mkdirSync(join(buildRoot, "obj"), { recursive: true });
+mkdirSync(swiftModuleCacheRoot, { recursive: true });
 mkdirSync(join(contentsRoot, "MacOS"), { recursive: true });
 mkdirSync(resourcesRoot, { recursive: true });
 
@@ -58,6 +66,7 @@ run("clang++", [
 const swiftFiles = [
   join(sourceRoot, "RimeSnapshot.swift"),
   join(sourceRoot, "RimeInputPolicy.swift"),
+  join(sourceRoot, "AIInputCommand.swift"),
   join(sourceRoot, "InputMethodSettings.swift"),
   join(sourceRoot, "InputMethodSettingsWindow.swift"),
   join(sourceRoot, "InputMethodApplicationDelegate.swift"),
@@ -69,15 +78,17 @@ const swiftFiles = [
   join(sourceRoot, "InputSourceRegistration.swift"),
   join(sourceRoot, "OverlayLayout.swift"),
   join(sourceRoot, "TranslationOverlay.swift"),
+  join(sourceRoot, "AIInputOverlay.swift"),
   join(sourceRoot, "TranslationService.swift"),
   join(sourceRoot, "main.swift"),
 ];
 const libRoot = join(vendorRoot, "lib");
 const linkArguments = [
+  "-module-cache-path", swiftModuleCacheRoot,
   "-target", `${architecture}-apple-macosx13.0`,
   "-sdk", sdkPath,
-  "-O",
-  "-module-name", "TypingDongnanya",
+  swiftOptimizationLevel,
+  "-module-name", "TypingChao",
   "-import-objc-header", join(sourceRoot, "RimeBridge.h"),
   ...swiftFiles,
   bridgeObject,
@@ -103,7 +114,7 @@ const linkArguments = [
 ];
 run("swiftc", linkArguments);
 
-writeBundledInfoPlist();
+cpSync(sourceInfoPath, bundleInfoPath);
 run("/usr/bin/codesign", [
   "--force",
   "--deep",
@@ -117,9 +128,9 @@ chmodSync(executablePath, 0o755);
 console.log(`已构建隔离输入法包：${appRoot}`);
 
 function copyRimeData() {
-  cpSync(join(sourceResourcesRoot, "TypingDongnanyaAppIcon.pdf"), join(resourcesRoot, "TypingDongnanyaAppIcon.pdf"));
-  cpSync(join(sourceResourcesRoot, "TypingDongnanyaAppIcon.icns"), join(resourcesRoot, "TypingDongnanyaAppIcon.icns"));
-  cpSync(join(sourceResourcesRoot, "TypingDongnanyaMenuIconV4.pdf"), join(resourcesRoot, "TypingDongnanyaMenuIconV4.pdf"));
+  cpSync(join(sourceResourcesRoot, "TypingChaoAppIcon.pdf"), join(resourcesRoot, "TypingChaoAppIcon.pdf"));
+  cpSync(join(sourceResourcesRoot, "TypingChaoAppIcon.icns"), join(resourcesRoot, "TypingChaoAppIcon.icns"));
+  cpSync(join(sourceResourcesRoot, "TypingChaoMenuIconV4.pdf"), join(resourcesRoot, "TypingChaoMenuIconV4.pdf"));
   for (const localizationName of ["en.lproj", "zh-Hans.lproj", "zh_CN.lproj"]) {
     cpSync(join(sourceResourcesRoot, localizationName), join(resourcesRoot, localizationName), { recursive: true });
   }
@@ -138,38 +149,6 @@ function copyRimeData() {
   const wubiDataRoot = join(projectRoot, "vendor", "wubimb-data");
   cpSync(join(wubiDataRoot, "LICENSE"), join(rimeDataRoot, "wubimb.LICENSE"));
   cpSync(join(wubiDataRoot, "SOURCE.json"), join(rimeDataRoot, "wubimb.SOURCE.json"));
-}
-
-// 将服务器部署时生成的受限路径 capability 写入包内，桌面端绝不保存上游 AI Key。
-function writeBundledInfoPlist() {
-  const sourceInfoText = readFileSync(sourceInfoPath, "utf8");
-  const baseEndpointMatch = sourceInfoText.match(
-    /<key>TypingDongnanyaAPIBaseEndpoint<\/key>\s*<string>([^<]+)<\/string>/
-  );
-  if (!baseEndpointMatch) {
-    throw new Error("Info.plist 缺少翻译代理基础地址");
-  }
-  const bundledEndpoint = baseEndpointMatch[1].replace(/\/+$/, "") + "/" + proxyAccessToken;
-  const bundledInfoText = sourceInfoText.replace(
-    baseEndpointMatch[0],
-    "<key>TypingDongnanyaAPIEndpoint</key>\n\t<string>" + bundledEndpoint + "</string>"
-  );
-  if (bundledInfoText === sourceInfoText) {
-    throw new Error("无法将翻译代理 capability 写入输入法包");
-  }
-  writeFileSync(bundleInfoPath, bundledInfoText);
-}
-
-// 本机构建只读取部署脚本生成的 48 位 capability 文件，不读取环境变量。
-function readProxyAccessToken() {
-  if (!existsSync(proxyAccessTokenPath)) {
-    throw new Error("找不到翻译代理 capability；请先部署服务器生成本机配置");
-  }
-  const accessToken = readFileSync(proxyAccessTokenPath, "utf8").trim();
-  if (!/^[a-f0-9]{48}$/i.test(accessToken)) {
-    throw new Error("翻译代理 capability 格式无效，请重新部署服务器");
-  }
-  return accessToken;
 }
 
 function readdir(directoryPath: string) {

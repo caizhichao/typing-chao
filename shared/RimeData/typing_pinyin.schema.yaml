@@ -7,7 +7,7 @@ schema:
   name: 全拼
   version: "1.0"
   author:
-    - Typing Dongnanya
+    - Typing Chao
   description: |
     面向简体中文输入的项目自有全拼方案，不依赖 GPL/LGPL 输入方案或词典。
 

@@ -13,7 +13,7 @@ int main(int argc, char** argv) {
   traits.user_data_dir = argv[2];
   traits.prebuilt_data_dir = argv[2];
   traits.staging_dir = argv[2];
-  traits.app_name = "rime.typing-dongnanya.smoke";
+  traits.app_name = "rime.typingchao.smoke";
   rime->setup(&traits);
   rime->deployer_initialize(&traits);
   if (!rime->deploy_config_file("default.yaml", "config_version") ||

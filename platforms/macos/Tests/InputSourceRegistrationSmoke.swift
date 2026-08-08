@@ -11,7 +11,8 @@ struct InputSourceRegistrationSmoke {
         let statusDescription = InputSourceRegistration.statusDescription()
         guard statusDescription.contains(
             "当前键盘输入源：\(InputSourceRegistration.currentKeyboardInputSourceID)"
-        ), statusDescription.contains("当前选中：\(expectedSelection)") else {
+        ), statusDescription.contains("当前选中：\(expectedSelection)"),
+           statusDescription.contains("输入法：Typing Chao") else {
             fatalError("status output must expose the real current keyboard input source")
         }
         print(

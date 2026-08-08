@@ -1,5 +1,5 @@
 {
-  "name": "typing-dongnanya",
+  "name": "typingchao",
   "private": true,
   "scripts": {
     "build": "bun run build:macos",
@@ -7,6 +7,7 @@
     "build:all": "bun run build:macos && bun run build:android",
     "test:all": "bun run test:macos && bun run test:android",
     "build:macos": "bun run scripts/macos/build.ts",
+    "build:macos:release": "bun run scripts/macos/build.ts --release",
     "test:macos": "bun run scripts/macos/test.ts",
     "install:macos": "bun run scripts/macos/install.ts",
     "build:android": "bun run scripts/android/build.ts",

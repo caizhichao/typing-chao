@@ -13,8 +13,8 @@
 
 namespace {
 
-constexpr const char* kLogTag = "TypingDongnanyaRime";
-constexpr const char* kApplicationName = "rime.typing-dongnanya.android";
+constexpr const char* kLogTag = "TypingChaoRime";
+constexpr const char* kApplicationName = "rime.typingchao.android";
 
 RimeApi* g_rime = nullptr;
 std::mutex g_rime_mutex;
@@ -249,9 +249,9 @@ jobject snapshotForSession(
 
 bool cacheJavaTypes(JNIEnv* environment) {
   jclass snapshotLocalClass = environment->FindClass(
-      "com/caizhichao/typingdongnanya/rime/RimeSnapshot");
+      "com/caizhichao/typingchao/rime/RimeSnapshot");
   jclass candidateLocalClass = environment->FindClass(
-      "com/caizhichao/typingdongnanya/rime/RimeCandidate");
+      "com/caizhichao/typingchao/rime/RimeCandidate");
   if (!snapshotLocalClass || !candidateLocalClass) {
     return false;
   }
@@ -272,7 +272,7 @@ bool cacheJavaTypes(JNIEnv* environment) {
   g_snapshot_candidates_field = environment->GetFieldID(
       g_snapshot_class,
       "candidateList",
-      "[Lcom/caizhichao/typingdongnanya/rime/RimeCandidate;");
+      "[Lcom/caizhichao/typingchao/rime/RimeCandidate;");
   g_snapshot_highlighted_field = environment->GetFieldID(g_snapshot_class, "highlightedIndex", "I");
   g_snapshot_page_number_field = environment->GetFieldID(g_snapshot_class, "pageNumber", "I");
   g_snapshot_last_page_field = environment->GetFieldID(g_snapshot_class, "isLastPage", "Z");
@@ -303,7 +303,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* javaVirtualMachine, void*) 
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_caizhichao_typingdongnanya_rime_RimeNative_initialize(
+Java_com_caizhichao_typingchao_rime_RimeNative_initialize(
     JNIEnv* environment,
     jobject,
     jstring sharedDataDirectory,
@@ -345,7 +345,7 @@ Java_com_caizhichao_typingdongnanya_rime_RimeNative_initialize(
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_caizhichao_typingdongnanya_rime_RimeNative_createSession(
+Java_com_caizhichao_typingchao_rime_RimeNative_createSession(
     JNIEnv*,
     jobject) {
   std::lock_guard<std::mutex> lock(g_rime_mutex);
@@ -361,7 +361,7 @@ Java_com_caizhichao_typingdongnanya_rime_RimeNative_createSession(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_caizhichao_typingdongnanya_rime_RimeNative_destroySession(
+Java_com_caizhichao_typingchao_rime_RimeNative_destroySession(
     JNIEnv*,
     jobject,
     jlong sessionIdentifier) {
@@ -372,7 +372,7 @@ Java_com_caizhichao_typingdongnanya_rime_RimeNative_destroySession(
 }
 
 extern "C" JNIEXPORT jobject JNICALL
-Java_com_caizhichao_typingdongnanya_rime_RimeNative_currentSnapshot(
+Java_com_caizhichao_typingchao_rime_RimeNative_currentSnapshot(
     JNIEnv* environment,
     jobject,
     jlong sessionIdentifier) {
@@ -385,7 +385,7 @@ Java_com_caizhichao_typingdongnanya_rime_RimeNative_currentSnapshot(
 }
 
 extern "C" JNIEXPORT jobject JNICALL
-Java_com_caizhichao_typingdongnanya_rime_RimeNative_selectSchema(
+Java_com_caizhichao_typingchao_rime_RimeNative_selectSchema(
     JNIEnv* environment,
     jobject,
     jlong sessionIdentifier,
@@ -408,7 +408,7 @@ Java_com_caizhichao_typingdongnanya_rime_RimeNative_selectSchema(
 }
 
 extern "C" JNIEXPORT jobject JNICALL
-Java_com_caizhichao_typingdongnanya_rime_RimeNative_processKey(
+Java_com_caizhichao_typingchao_rime_RimeNative_processKey(
     JNIEnv* environment,
     jobject,
     jlong sessionIdentifier,
@@ -434,7 +434,7 @@ Java_com_caizhichao_typingdongnanya_rime_RimeNative_processKey(
 }
 
 extern "C" JNIEXPORT jobject JNICALL
-Java_com_caizhichao_typingdongnanya_rime_RimeNative_selectCandidate(
+Java_com_caizhichao_typingchao_rime_RimeNative_selectCandidate(
     JNIEnv* environment,
     jobject,
     jlong sessionIdentifier,
@@ -454,7 +454,7 @@ Java_com_caizhichao_typingdongnanya_rime_RimeNative_selectCandidate(
 }
 
 extern "C" JNIEXPORT jobject JNICALL
-Java_com_caizhichao_typingdongnanya_rime_RimeNative_changePage(
+Java_com_caizhichao_typingchao_rime_RimeNative_changePage(
     JNIEnv* environment,
     jobject,
     jlong sessionIdentifier,
@@ -477,7 +477,7 @@ Java_com_caizhichao_typingdongnanya_rime_RimeNative_changePage(
 }
 
 extern "C" JNIEXPORT jobject JNICALL
-Java_com_caizhichao_typingdongnanya_rime_RimeNative_commitComposition(
+Java_com_caizhichao_typingchao_rime_RimeNative_commitComposition(
     JNIEnv* environment,
     jobject,
     jlong sessionIdentifier) {
@@ -495,7 +495,7 @@ Java_com_caizhichao_typingdongnanya_rime_RimeNative_commitComposition(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_caizhichao_typingdongnanya_rime_RimeNative_clearComposition(
+Java_com_caizhichao_typingchao_rime_RimeNative_clearComposition(
     JNIEnv*,
     jobject,
     jlong sessionIdentifier) {
@@ -506,7 +506,7 @@ Java_com_caizhichao_typingdongnanya_rime_RimeNative_clearComposition(
 }
 
 extern "C" JNIEXPORT jobject JNICALL
-Java_com_caizhichao_typingdongnanya_rime_RimeNative_setOption(
+Java_com_caizhichao_typingchao_rime_RimeNative_setOption(
     JNIEnv* environment,
     jobject,
     jlong sessionIdentifier,

@@ -9,63 +9,54 @@ import { spawnSync } from "node:child_process";
 const projectRoot = resolve(import.meta.dir, "../..");
 const sshAlias = "tencent-cloud";
 const publicIPAddress = "114.132.185.123";
-const remoteReleaseRoot = "/opt/typing-dongnanya-download/releases";
+const remoteReleaseRoot = "/opt/typingchao-download/releases";
 const localApkPath = join(projectRoot, "platforms/android/app/build/outputs/apk/debug/app-debug.apk");
-const localDownloadPathConfig = join(homedir(), ".config", "typing-dongnanya", "apk-download-path");
+const localDownloadPathConfig = join(homedir(), ".config", "typingchao", "apk-download-path");
 const stableDownloadPath = readStableDownloadPath(localDownloadPathConfig);
 const stablePathPartList = stableDownloadPath.split("/");
 const releaseName = stablePathPartList[0];
 const apkFileName = stablePathPartList[2];
 const remoteApkPath = `${remoteReleaseRoot}/${stableDownloadPath}`;
-const publicDownloadURL = `https://${publicIPAddress}/typing-dongnanya-download/${stableDownloadPath}`;
-const invalidDownloadURL = `https://${publicIPAddress}/typing-dongnanya-download/${releaseName}/${randomBytes(36).toString("base64url")}/${apkFileName}`;
+const publicDownloadURL = `https://${publicIPAddress}/typingchao-download/${stableDownloadPath}`;
+const invalidDownloadURL = `https://${publicIPAddress}/typingchao-download/${releaseName}/${randomBytes(36).toString("base64url")}/${apkFileName}`;
 const localApk = readFileSync(localApkPath);
 const localApkSha256 = sha256(localApk);
 
 if (localApk.length === 0) throw new Error(`APK 为空：${localApkPath}`);
 
 // 绿盾会改变原生 scp/rsync 读取的构建产物，统一由 Bun 读取后通过 SSH 标准输入传输。
-uploadRemoteFile("/tmp/typing-dongnanya-android.apk", localApk);
+uploadRemoteFile("/tmp/typingchao-android.apk", localApk);
 runRemoteScript(`
 set -euo pipefail
 remote_apk_path='${remoteApkPath}'
 remote_apk_directory=$(dirname "$remote_apk_path")
-previous_apk_path=/tmp/typing-dongnanya-previous.apk
+previous_apk_path=/tmp/typingchao-previous.apk
 sudo mkdir -p "$remote_apk_directory"
-sudo find /tmp -maxdepth 1 -type f -name 'typing-dongnanya-previous.apk' -delete
+sudo find /tmp -maxdepth 1 -type f -name 'typingchao-previous.apk' -delete
 if sudo test -f "$remote_apk_path"; then
   sudo cp -a "$remote_apk_path" "$previous_apk_path"
 fi
-sudo install -o root -g root -m 644 /tmp/typing-dongnanya-android.apk "$remote_apk_path.new"
+sudo install -o root -g root -m 644 /tmp/typingchao-android.apk "$remote_apk_path.new"
 remote_apk_sha256=$(sha256sum "$remote_apk_path.new" | awk '{print $1}')
 test "$remote_apk_sha256" = '${localApkSha256}'
 sudo mv "$remote_apk_path.new" "$remote_apk_path"
-sudo find /tmp -maxdepth 1 -type f -name 'typing-dongnanya-android.apk' -delete
+sudo find /tmp -maxdepth 1 -type f -name 'typingchao-android.apk' -delete
 sudo nginx -t
 systemctl is-active --quiet nginx.service
-systemctl is-active --quiet typing-dongnanya-api.service
 printf 'path=%s\nsha256=%s\n' "$remote_apk_path" "$remote_apk_sha256"
 `);
 
 try {
   verifyPublicDownload();
-  run("curl", [
-    "--fail",
-    "--silent",
-    "--show-error",
-    "--max-time",
-    "10",
-    `https://${publicIPAddress}/typing-dongnanya-api/healthz`,
-  ]);
 } catch (errorValue) {
   runRemoteScript(`
 set -euo pipefail
 remote_apk_path='${remoteApkPath}'
-previous_apk_path=/tmp/typing-dongnanya-previous.apk
+previous_apk_path=/tmp/typingchao-previous.apk
 if sudo test -f "$previous_apk_path"; then
   sudo install -o root -g root -m 644 "$previous_apk_path" "$remote_apk_path"
 fi
-sudo find /tmp -maxdepth 1 -type f -name 'typing-dongnanya-previous.apk' -delete
+sudo find /tmp -maxdepth 1 -type f -name 'typingchao-previous.apk' -delete
 `);
   throw errorValue;
 }
@@ -75,12 +66,11 @@ set -euo pipefail
 remote_apk_path='${remoteApkPath}'
 sudo find '${remoteReleaseRoot}' -type f -name '*.apk' ! -path "$remote_apk_path" -delete
 sudo find '${remoteReleaseRoot}' -depth -type d -empty -delete
-sudo find /tmp -maxdepth 1 -type f -name 'typing-dongnanya-previous.apk' -delete
+sudo find /tmp -maxdepth 1 -type f -name 'typingchao-previous.apk' -delete
 apk_count=$(sudo find '${remoteReleaseRoot}' -type f -name '*.apk' | wc -l | tr -d ' ')
 test "$apk_count" = 1
 test "$(sha256sum "$remote_apk_path" | awk '{print $1}')" = '${localApkSha256}'
 systemctl is-active --quiet nginx.service
-systemctl is-active --quiet typing-dongnanya-api.service
 sudo nginx -t
 printf 'apk_count=%s\n' "$apk_count"
 `);

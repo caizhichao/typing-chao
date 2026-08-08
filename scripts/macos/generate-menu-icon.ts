@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 
 const projectRoot = resolve(import.meta.dir, "../..");
 const outputPath = resolve(
-  process.argv[2] ?? `${projectRoot}/platforms/macos/Resources/TypingDongnanyaMenuIconV4.pdf`,
+  process.argv[2] ?? `${projectRoot}/platforms/macos/Resources/TypingChaoMenuIconV4.pdf`,
 );
 
 // 输入源菜单图标只绘制透明背景上的单色双向箭头，避免模板着色把背景渲染成实心方块。
@@ -40,7 +40,7 @@ const objectList = [
   `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}endstream`,
 ];
 
-let pdf = "%PDF-1.4\n% typing-dongnanya-v4\n";
+let pdf = "%PDF-1.4\n% typingchao-v4\n";
 const offsetList = [0];
 for (const [index, object] of objectList.entries()) {
   offsetList.push(Buffer.byteLength(pdf));

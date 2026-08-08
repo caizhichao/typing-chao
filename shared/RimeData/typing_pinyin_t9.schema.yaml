@@ -9,7 +9,7 @@ schema:
   name: 中文九键
   version: "1.0"
   author:
-    - Typing Dongnanya
+    - Typing Chao
   description: |
     通过 2–9 数字键输入歧义拼音，候选与词频复用项目 Apache-2.0 拼音数据。
 

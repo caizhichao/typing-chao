@@ -5,31 +5,23 @@ plugins {
     id("com.android.application")
 }
 
-val proxyAccessTokenFile = file("${System.getProperty("user.home")}/.config/typing-dongnanya/access-token")
-val proxyAccessToken = if (proxyAccessTokenFile.isFile) proxyAccessTokenFile.readText().trim() else ""
-if (!proxyAccessToken.matches(Regex("^[a-fA-F0-9]{48}$"))) {
-    throw GradleException("缺少有效的 ~/.config/typing-dongnanya/access-token，请先部署或同步翻译服务 capability")
-}
-val translationBaseEndpoint = "https://114.132.185.123/typing-dongnanya-api/v1/chat/completions"
-val translationEndpoint = "$translationBaseEndpoint/$proxyAccessToken"
 val generatedRimeAssetsRoot = file("$projectDir/build/generated/rimeAssets")
 val generatedHandwritingAssetsRoot = file("$projectDir/build/generated/handwritingAssets")
 val compilerLauncherPath = rootProject.file("../../scripts/android/apple-clang-launcher.ts").absolutePath
 
 android {
-    namespace = "com.caizhichao.typingdongnanya"
+    namespace = "com.caizhichao.typingchao"
     compileSdk = 36
     buildToolsVersion = "36.0.0"
     ndkVersion = "28.2.13676358"
 
     defaultConfig {
-        applicationId = "com.caizhichao.typingdongnanya"
+        applicationId = "com.caizhichao.typingchao"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.3.2"
+        versionCode = 9
+        versionName = "0.3.3"
 
-        buildConfigField("String", "TRANSLATION_ENDPOINT", "\"$translationEndpoint\"")
         ndk {
             abiFilters += "arm64-v8a"
         }

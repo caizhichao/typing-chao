@@ -3,7 +3,7 @@ import Foundation
 @main
 struct InputMethodSettingsSmoke {
     static func main() {
-        let suiteName = "com.caizhichao.typing-dongnanya.settings-smoke"
+        let suiteName = "com.caizhichao.typingchao.settings-smoke"
         guard let userDefaults = UserDefaults(suiteName: suiteName) else {
             fatalError("unable to create settings smoke defaults")
         }
@@ -13,8 +13,8 @@ struct InputMethodSettingsSmoke {
         }
 
         let settings = InputMethodSettings(userDefaults: userDefaults)
-        guard settings.isTranslationEnabled else {
-            fatalError("translation should default to enabled")
+        guard !settings.isTranslationEnabled else {
+            fatalError("translation should default to disabled")
         }
         guard settings.targetLanguage == .english else {
             fatalError("target language should default to English")
@@ -29,6 +29,12 @@ struct InputMethodSettingsSmoke {
         settings.setTranslationEnabled(false)
         settings.setTargetLanguage(.thai)
         settings.setSelectedSchemaIdentifier("typing_double_pinyin_natural")
+        guard settings.setDeepSeekAPIKey("  test-deepseek-key  ") else {
+            fatalError("DeepSeek API key cache should accept settings input")
+        }
+        guard settings.deepSeekAPIKey == "test-deepseek-key" else {
+            fatalError("DeepSeek API key should be cached in user settings")
+        }
         settings.persistRimeOptionStateList([
             RimeOptionState(optionName: .asciiMode, isEnabled: true),
             RimeOptionState(optionName: .fullShape, isEnabled: true),
@@ -51,6 +57,9 @@ struct InputMethodSettingsSmoke {
             $0.optionName == .fullShape && $0.isEnabled
         }) else {
             fatalError("full shape setting was not persisted")
+        }
+        guard settings.setDeepSeekAPIKey(""), settings.deepSeekAPIKey == nil else {
+            fatalError("DeepSeek API key should be removable from user settings")
         }
         print("Input method settings smoke test passed: translation, target language, schema, and Rime option scope")
     }

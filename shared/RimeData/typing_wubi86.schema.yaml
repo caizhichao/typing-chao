@@ -9,7 +9,7 @@ schema:
   name: 五笔 86
   version: "1.0"
   author:
-    - Typing Dongnanya
+    - Typing Chao
   description: |
     五笔 86 键盘输入，候选和词组使用项目锁定并保留来源声明的 MIT 码表。
 

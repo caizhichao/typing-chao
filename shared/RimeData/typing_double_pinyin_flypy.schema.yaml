@@ -9,7 +9,7 @@ schema:
   name: 小鹤双拼
   version: "1.0"
   author:
-    - Typing Dongnanya
+    - Typing Chao
   description: |
     基于标准小鹤双拼键位输入，候选与词频使用项目生成的 Apache-2.0 拼音数据。
 

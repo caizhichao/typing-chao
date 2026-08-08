@@ -9,7 +9,7 @@ const androidRoot = join(projectRoot, "platforms", "android");
 const androidSdkRoot = "/opt/homebrew/share/android-commandlinetools";
 const adbPath = join(androidSdkRoot, "platform-tools", "adb");
 const debugApkPath = join(androidRoot, "app", "build", "outputs", "apk", "debug", "app-debug.apk");
-const applicationIdentifier = "com.caizhichao.typingdongnanya";
+const applicationIdentifier = "com.caizhichao.typingchao";
 
 if (!existsSync(adbPath)) throw new Error("找不到 adb，请先安装 Android platform-tools");
 if (!existsSync(debugApkPath)) throw new Error("找不到 Debug APK，请先运行 bun run scripts/android/build.ts");
@@ -20,7 +20,7 @@ if (deviceList.length !== 1) {
 }
 run(adbPath, ["install", "-r", debugApkPath]);
 run(adbPath, ["shell", "am", "start", "-n", `${applicationIdentifier}/.settings.SettingsActivity`]);
-console.log("已安装并打开 Typing 东南亚设置页；请按页面引导启用并选择输入法。");
+console.log("已安装并打开 Typing Chao 设置页；请按页面引导启用并选择输入法。");
 
 function run(command: string, args: string[]) {
   console.log(`$ ${command} ${args.join(" ")}`);

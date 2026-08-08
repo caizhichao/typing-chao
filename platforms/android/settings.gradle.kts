@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "TypingDongnanyaAndroid"
+rootProject.name = "TypingChaoAndroid"
 include(":app")

@@ -239,7 +239,7 @@ private final class OverlayLayoutSmokeClient: NSObject, IMKTextInput {
 
     func supportsUnicode() -> Bool { true }
 
-    func bundleIdentifier() -> String { "com.caizhichao.typing-dongnanya.overlay-smoke" }
+    func bundleIdentifier() -> String { "com.caizhichao.typingchao.overlay-smoke" }
 
     func windowLevel() -> CGWindowLevel { 0 }
 

@@ -9,8 +9,6 @@ vendor/librime/include/
 vendor/librime/lib/
 vendor/librime/bin/
 vendor/librime/share/
-server/typing-dongnanya-api/target/
-server/typing-dongnanya-api/build/
 .gradle/
 .idea/
 local.properties

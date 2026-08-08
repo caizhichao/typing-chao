@@ -1,22 +1,25 @@
 #!/usr/bin/env bun
 
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const projectRoot = resolve(import.meta.dir, "../..");
 const macOSRoot = join(projectRoot, "platforms", "macos");
-const sourceRoot = join(macOSRoot, "Sources", "TypingDongnanyaInputMethod");
+const sourceRoot = join(macOSRoot, "Sources", "TypingChaoInputMethod");
 const testRoot = join(macOSRoot, "Tests");
 const macOSInfoPath = join(macOSRoot, "Info.plist");
 const buildRoot = join(macOSRoot, "build");
 const testBuildRoot = join(buildRoot, "tests");
 const testBinaryRoot = join(testBuildRoot, "bin");
 const testDataRoot = join(testBuildRoot, "data");
-const proxyAccessTokenPath = join(homedir(), ".config", "typing-dongnanya", "access-token");
+const swiftModuleCacheRoot = join(tmpdir(), "typingchao-swift-module-cache");
 const vendorRoot = join(projectRoot, "vendor", "librime");
-const sdkPath = runText("xcrun", ["--show-sdk-path"]);
+const defaultSDKPath = runText("xcrun", ["--show-sdk-path"]);
+const compatibleSDKPath = join(dirname(defaultSDKPath), "MacOSX15.4.sdk");
+// 当前 CLT 的 Swift 与 26.5 SDK 内部构建号不匹配，测试需与构建使用同一兼容 SDK。
+const sdkPath = existsSync(compatibleSDKPath) ? compatibleSDKPath : defaultSDKPath;
 const architecture = runText("arch", []);
 const smokeDirectory = join(testDataRoot, "rime");
 const outputPath = join(testBinaryRoot, "RimeSmoke");
@@ -26,6 +29,7 @@ verifyCommercialRimeDataContract();
 verifyStableDevelopmentCodeRequirement();
 verifyBundledTranslationEndpoint();
 verifyTranslationPromptContract();
+verifyAIInputContract();
 verifyInputControllerLifecycleContract();
 verifyInputLatencyContract();
 verifyClipboardOnlyTranslationContract();
@@ -67,7 +71,7 @@ run("clang++", [
   outputPath,
 ]);
 run(outputPath, [
-  join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", "RimeData"),
+  join(buildRoot, "TypingChao.app", "Contents", "Resources", "RimeData"),
   smokeDirectory,
 ]);
 
@@ -223,6 +227,40 @@ run("swiftc", [
 ]);
 run(translationOverlaySmokeOutputPath, []);
 
+const aiInputOverlaySmokeOutputPath = join(testBinaryRoot, "AIInputOverlaySmoke");
+run("swiftc", [
+  "-target",
+  `${architecture}-apple-macosx13.0`,
+  "-sdk",
+  sdkPath,
+  join(sourceRoot, "OverlayLayout.swift"),
+  join(sourceRoot, "InputMethodSettings.swift"),
+  join(sourceRoot, "AIInputOverlay.swift"),
+  join(testRoot, "AIInputOverlaySmoke.swift"),
+  "-framework",
+  "AppKit",
+  "-framework",
+  "InputMethodKit",
+  "-framework",
+  "Carbon",
+  "-o",
+  aiInputOverlaySmokeOutputPath,
+]);
+run(aiInputOverlaySmokeOutputPath, []);
+
+const aiInputCommandSmokeOutputPath = join(testBinaryRoot, "AIInputCommandSmoke");
+run("swiftc", [
+  "-target",
+  `${architecture}-apple-macosx13.0`,
+  "-sdk",
+  sdkPath,
+  join(sourceRoot, "AIInputCommand.swift"),
+  join(testRoot, "AIInputCommandSmoke.swift"),
+  "-o",
+  aiInputCommandSmokeOutputPath,
+]);
+run(aiInputCommandSmokeOutputPath, []);
+
 const menuIconSmokeOutputPath = join(testBinaryRoot, "MenuIconSmoke");
 run("swiftc", [
   "-parse-as-library",
@@ -237,7 +275,7 @@ run("swiftc", [
   menuIconSmokeOutputPath,
 ]);
 run(menuIconSmokeOutputPath, [
-  join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", "TypingDongnanyaMenuIconV4.pdf"),
+  join(buildRoot, "TypingChao.app", "Contents", "Resources", "TypingChaoMenuIconV4.pdf"),
 ]);
 
 const appIconSmokeOutputPath = join(testBinaryRoot, "AppIconSmoke");
@@ -254,7 +292,7 @@ run("swiftc", [
   appIconSmokeOutputPath,
 ]);
 run(appIconSmokeOutputPath, [
-  join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", "TypingDongnanyaAppIcon.pdf"),
+  join(buildRoot, "TypingChao.app", "Contents", "Resources", "TypingChaoAppIcon.pdf"),
 ]);
 
 const bridgeSmokeDirectory = join(testDataRoot, "rime-bridge");
@@ -297,7 +335,7 @@ run("clang++", [
   bridgeSmokeOutputPath,
 ]);
 run(bridgeSmokeOutputPath, [
-  join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", "RimeData"),
+  join(buildRoot, "TypingChao.app", "Contents", "Resources", "RimeData"),
   bridgeSmokeDirectory,
 ]);
 
@@ -327,6 +365,9 @@ function verifyInputControllerLifecycleContract() {
   }
   if (!deactivateServerBody.includes("activeOverlayController = nil")) {
     throw new Error("输入源真正停用时必须释放当前输入会话所有权");
+  }
+  if (!deactivateServerBody.includes("if isActiveAIInputController {")) {
+    throw new Error("AI 面板内部会话不得停用原宿主输入法控制器");
   }
   if (deactivateServerBody.includes("sessionClient = nil")) {
     throw new Error("普通停用不得丢弃控制器初始化时绑定的会话客户端");
@@ -360,6 +401,13 @@ function verifyInputLatencyContract() {
   }
   const activateServerBody = swiftMethodBody(controllerSource, "override func activateServer");
   if (
+    !controllerSource.includes("override func handle(_ event: NSEvent!, client sender: Any!)") ||
+    !controllerSource.includes("override func recognizedEvents(_ sender: Any!)") ||
+    controllerSource.includes("inputText(_ string: String!, key keyCode:")
+  ) {
+    throw new Error("键盘必须只使用 InputMethodKit 原始事件入口，不能混用带键码输入入口");
+  }
+  if (
     activateServerBody.includes("Timer") ||
     activateServerBody.includes("Monitor") ||
     activateServerBody.includes("Observer")
@@ -386,14 +434,9 @@ function verifyClipboardOnlyTranslationContract() {
     controllerSource,
     "private func activateClipboardTranslationDraft(",
   );
-  const handleBody = swiftMethodBody(controllerSource, "override func handle(_ event:");
-  const inputTextBody = swiftMethodBody(
+  const handleBody = swiftMethodBody(
     controllerSource,
-    "override func inputText(_ string: String!, client sender: Any!)",
-  );
-  const keyedInputTextBody = swiftMethodBody(
-    controllerSource,
-    "override func inputText(_ string: String!, key keyCode:",
+    "override func handle(_ event: NSEvent!, client sender: Any!)",
   );
   const prepareClientBody = swiftMethodBody(
     controllerSource,
@@ -425,11 +468,10 @@ function verifyClipboardOnlyTranslationContract() {
     throw new Error("粘贴翻译必须把已核对的剪贴板正文接管为内部 marked draft");
   }
   if (
-    !handleBody.includes("activateClipboardTranslationDraft") ||
-    !inputTextBody.includes("expectedText: string") ||
-    !keyedInputTextBody.includes("activateClipboardTranslationDraft")
+    !handleBody.includes("TranslationPolicy.commandRequestsClipboardTranslation") ||
+    !handleBody.includes("activateClipboardTranslationDraft")
   ) {
-    throw new Error("Command-V、手动翻译和多字符输入必须共用剪贴板草稿入口");
+    throw new Error("唯一原始事件入口必须让 Command-V 进入剪贴板草稿入口");
   }
   if (
     !scheduleBody.includes("stableInputDelayMilliseconds") ||
@@ -456,13 +498,11 @@ function verifyClipboardOnlyTranslationContract() {
   ) {
     throw new Error("翻译草稿必须绑定控制器生命周期，不能因 IMK 代理抖动而清空");
   }
-  for (const inputBody of [handleBody, inputTextBody, keyedInputTextBody]) {
-    if (
-      !inputBody.includes("handleTranslationDraftEditingKey") ||
-      !inputBody.includes("TranslationPolicy.shouldPassThroughHostEditingKey")
-    ) {
-      throw new Error("三个输入入口必须先处理内部草稿编辑，再决定是否交还宿主");
-    }
+  if (
+    !handleBody.includes("handleTranslationDraftEditingKey") ||
+    !handleBody.includes("TranslationPolicy.shouldPassThroughHostEditingKey")
+  ) {
+    throw new Error("唯一原始事件入口必须先处理内部草稿编辑，再决定是否交还宿主");
   }
   if (
     mainSource.includes("startPasteShortcutMonitoring") ||
@@ -491,14 +531,9 @@ function verifyEscapeClearContract() {
     join(sourceRoot, "InputMethodController.swift"),
     "utf8",
   );
-  const handleBody = swiftMethodBody(controllerSource, "override func handle(_ event:");
-  const inputTextBody = swiftMethodBody(
+  const handleBody = swiftMethodBody(
     controllerSource,
-    "override func inputText(_ string: String!, client sender: Any!)",
-  );
-  const keyedInputTextBody = swiftMethodBody(
-    controllerSource,
-    "override func inputText(_ string: String!, key keyCode:",
+    "override func handle(_ event: NSEvent!, client sender: Any!)",
   );
   const clearBody = swiftMethodBody(
     controllerSource,
@@ -506,13 +541,9 @@ function verifyEscapeClearContract() {
   );
   if (
     !handleBody.includes('keyName == "Escape"') ||
-    !handleBody.includes("clearInputCache(client: client)") ||
-    !inputTextBody.includes('string == "\\u{1b}"') ||
-    !inputTextBody.includes("clearInputCache(client: client)") ||
-    !keyedInputTextBody.includes('resolvedKeyName == "Escape"') ||
-    !keyedInputTextBody.includes("clearInputCache(client: client)")
+    !handleBody.includes("clearInputCache(client: client)")
   ) {
-    throw new Error("三个 InputMethodKit 输入入口都必须把 Esc 收口到统一缓存清理入口");
+    throw new Error("唯一原始事件入口必须把 Esc 收口到统一缓存清理入口");
   }
   for (const requiredToken of [
     "cancelTranslationPresentationPreservingDraft()",
@@ -534,29 +565,22 @@ function verifyEscapeClearContract() {
   }
 }
 
-// 首符号和拼音后的多选标点必须在候选 UI 刷新前直接确认，三个 IMK 入口共用同一处理链。
+// 首符号和拼音后的多选标点必须在候选 UI 刷新前由唯一键盘入口直接确认。
 function verifyDirectSymbolContract() {
   const controllerSource = readFileSync(
     join(sourceRoot, "InputMethodController.swift"),
     "utf8",
   );
-  const handleBody = swiftMethodBody(controllerSource, "override func handle(_ event:");
-  const inputTextBody = swiftMethodBody(
+  const handleBody = swiftMethodBody(
     controllerSource,
-    "override func inputText(_ string: String!, client sender: Any!)",
-  );
-  const keyedInputTextBody = swiftMethodBody(
-    controllerSource,
-    "override func inputText(_ string: String!, key keyCode:",
+    "override func handle(_ event: NSEvent!, client sender: Any!)",
   );
   const processBody = swiftMethodBody(
     controllerSource,
     "private func processRimeKey(_ keyName: String, modifiers:",
   );
-  for (const inputBody of [handleBody, inputTextBody, keyedInputTextBody]) {
-    if (!inputBody.includes("processRimeKey(")) {
-      throw new Error("三个 InputMethodKit 输入入口必须共用直接符号处理链");
-    }
+  if (!handleBody.includes("processRimeKey(")) {
+    throw new Error("唯一原始事件入口必须接入直接符号处理链");
   }
   if (
     !processBody.includes("RimeInputPolicy.directSymbolCandidateIndex") ||
@@ -586,13 +610,8 @@ function verifyKnownPassThroughContract() {
   ) {
     throw new Error("已知直通文本必须进入内部 marked draft，未知键必须先确认原文");
   }
-  for (const callText of [
-    "handleUnhandledKey(keyName, client: client)",
-    "handleUnhandledKey(resolvedKeyName, client: client)",
-  ]) {
-    if (!controllerSource.includes(callText)) {
-      throw new Error("三个 InputMethodKit 输入入口必须把客户端交给直通文本处理链");
-    }
+  if (!controllerSource.includes("handleUnhandledKey(keyName, client: client)")) {
+    throw new Error("唯一原始事件入口必须把客户端交给直通文本处理链");
   }
 }
 
@@ -631,102 +650,6 @@ function verifyNoExternalPermissionContract() {
   }
 }
 
-// 候选条只能有一个真实设置按钮，点击后由统一 AppKit 生命周期打开唯一设置窗口。
-function verifyCandidateSettingsContract() {
-  const candidateSource = readFileSync(
-    join(sourceRoot,
-      "CandidateOverlay.swift",
-    ),
-    "utf8",
-  );
-  const mainSource = readFileSync(
-    join(sourceRoot, "main.swift"),
-    "utf8",
-  );
-  const settingsSource = readFileSync(
-    join(sourceRoot,
-      "InputMethodSettingsWindow.swift",
-    ),
-    "utf8",
-  );
-  const inputModeStatusSource = readFileSync(
-    join(sourceRoot,
-      "InputModeStatusOverlay.swift",
-    ),
-    "utf8",
-  );
-  const controllerSource = readFileSync(
-    join(sourceRoot,
-      "InputMethodController.swift",
-    ),
-    "utf8",
-  );
-  if (
-    !candidateSource.includes("CandidateSettingsButton") ||
-    !candidateSource.includes('systemSymbolName: "gearshape"') ||
-    candidateSource.includes('NSString(string: "⌄")') ||
-    candidateSource.includes('NSString(string: "⚙︎")')
-  ) {
-    throw new Error("候选条尾部必须只保留一个可点击的系统齿轮按钮");
-  }
-  if (!mainSource.includes("TypingDongnanyaApplicationDelegate.shared")) {
-    throw new Error("输入法进程必须由统一 AppKit delegate 管理设置窗口生命周期");
-  }
-  if (
-    !settingsSource.includes("拼音方案") ||
-    !settingsSource.includes("schemaPopUpButton") ||
-    !settingsSource.includes("schemaHandler") ||
-    !settingsSource.includes("字符宽度") ||
-    !settingsSource.includes("标点样式") ||
-    !settingsSource.includes("Shift + Space")
-  ) {
-    throw new Error("设置页必须把半/全角、标点样式和快捷切换分开说明");
-  }
-  const appearanceRefreshCount = settingsSource.split("override func viewDidChangeEffectiveAppearance()").length - 1;
-  const appearanceResolutionCount = settingsSource.split("performAsCurrentDrawingAppearance").length - 1;
-  if (
-    !settingsSource.includes("let rootView = SettingsRootView()") ||
-    !settingsSource.includes("label.textColor = .labelColor") ||
-    appearanceRefreshCount < 3 ||
-    appearanceResolutionCount < 3
-  ) {
-    throw new Error("设置页背景、卡片和侧栏必须与原生控件使用同一套动态明暗外观");
-  }
-  if (
-    !candidateSource.includes("CandidateBarTrailingLayout") ||
-    !candidateSource.includes("drawTrailingSeparator()")
-  ) {
-    throw new Error("候选条分页区与设置区必须使用独立布局和可见分隔");
-  }
-  if (
-    !settingsSource.includes("window?.level = .normal") ||
-    settingsSource.includes("window?.orderFrontRegardless()")
-  ) {
-    throw new Error("设置窗口必须使用标准窗口层级，不能永久悬浮在其它应用上方");
-  }
-  if (!settingsSource.includes("InputMethodSettings.shared.persistRimeOptionStateList(optionStateList)")) {
-    throw new Error("设置窗口失去当前输入控制器时仍必须保存 Rime 选项供下次会话恢复");
-  }
-  if (!inputModeStatusSource.includes("translationOrigin(for: panelSize, candidateFrame: candidateFrame)")) {
-    throw new Error("半/全角状态提示必须避开当前候选条，不能复用同一候选位置");
-  }
-  if (!controllerSource.includes("candidateFrame: translationOverlay.visibleFrame")) {
-    throw new Error("非组字状态提示必须同时避让已有译文卡");
-  }
-  const persistOptionBody = swiftMethodBody(
-    controllerSource,
-    "private func persistChangedCharacterOptionState(",
-  );
-  if (
-    !persistOptionBody.includes(".fullShape") ||
-    !persistOptionBody.includes(".asciiPunctuation") ||
-    !persistOptionBody.includes("persistRimeOptionStateList")
-  ) {
-    throw new Error("Shift-Space 与 Control-Period 的 Rime 状态变化必须持久化");
-  }
-}
-
-// 测试只提取目标 Swift 方法体，避免同文件其它生命周期分支影响断言。
 function swiftMethodBody(source: string, signature: string) {
   const signatureIndex = source.indexOf(signature);
   if (signatureIndex < 0) throw new Error(`找不到方法：${signature}`);
@@ -741,93 +664,9 @@ function swiftMethodBody(source: string, signature: string) {
   throw new Error(`方法体未闭合：${signature}`);
 }
 
-function verifyBundledTranslationEndpoint() {
-  const sourceInfoPath = macOSInfoPath;
-  const bundleInfoPath = join(
-    buildRoot,
-    "TypingDongnanya.app",
-    "Contents",
-    "Info.plist",
-  );
-  const accessToken = readProxyAccessToken();
-  const sourceInfoText = readFileSync(sourceInfoPath, "utf8");
-  const sourceInfo = readInfoPlist(sourceInfoPath);
-  const bundledInfo = readInfoPlist(bundleInfoPath);
-  if (sourceInfoText.includes(accessToken)) {
-    throw new Error("源 Info.plist 不得写入翻译代理 capability");
-  }
-  if (
-    sourceInfo.TypingDongnanyaAPIEndpoint !== undefined ||
-    typeof sourceInfo.TypingDongnanyaAPIBaseEndpoint !== "string" ||
-    bundledInfo.TypingDongnanyaAPIBaseEndpoint !== undefined ||
-    typeof bundledInfo.TypingDongnanyaAPIEndpoint !== "string"
-  ) {
-    throw new Error("翻译代理地址必须只在构建包内以 capability 完整路径出现");
-  }
-
-  const baseEndpointURL = new URL(sourceInfo.TypingDongnanyaAPIBaseEndpoint);
-  const endpointURL = new URL(bundledInfo.TypingDongnanyaAPIEndpoint);
-  const expectedPath = baseEndpointURL.pathname.replace(/\/+$/, "") + "/" + accessToken;
-  if (
-    !["http:", "https:"].includes(baseEndpointURL.protocol) ||
-    !baseEndpointURL.hostname ||
-    baseEndpointURL.username ||
-    baseEndpointURL.password ||
-    baseEndpointURL.search ||
-    baseEndpointURL.hash ||
-    !["http:", "https:"].includes(endpointURL.protocol) ||
-    endpointURL.protocol !== baseEndpointURL.protocol ||
-    endpointURL.hostname !== baseEndpointURL.hostname ||
-    endpointURL.port !== baseEndpointURL.port ||
-    endpointURL.username ||
-    endpointURL.password ||
-    endpointURL.search ||
-    endpointURL.hash ||
-    endpointURL.pathname !== expectedPath
-  ) {
-    throw new Error("输入法包必须使用固定代理基础地址和部署生成的 capability 路径");
-  }
-
-  const transportSecurity = bundledInfo.NSAppTransportSecurity;
-  const exceptionDomains = transportSecurity?.NSExceptionDomains ?? {};
-  const exceptionDomainNames = Object.keys(exceptionDomains);
-  const endpointException = exceptionDomains[endpointURL.hostname];
-  if (
-    endpointURL.protocol === "http:" &&
-    (exceptionDomainNames.length !== 1 ||
-      exceptionDomainNames[0] !== endpointURL.hostname ||
-      endpointException?.NSExceptionAllowsInsecureHTTPLoads !== true)
-  ) {
-    throw new Error("HTTP 翻译端点只能为目标主机声明唯一的 ATS 例外");
-  }
-  if (transportSecurity?.NSAllowsArbitraryLoads === true) {
-    throw new Error("输入法包不得关闭全局 ATS 限制");
-  }
-
-  const menuIconFileName = "TypingDongnanyaMenuIconV4.pdf";
-  const appIconFileName = "TypingDongnanyaAppIcon.pdf";
-  const appIconBundleName = "TypingDongnanyaAppIcon.icns";
-  const modeInfo = bundledInfo.ComponentInputModeDict?.tsInputModeListKey?.[
-    "com.caizhichao.typing-dongnanya.inputmethod.TypingDongnanya.Pinyin"
-  ];
-  if (
-    bundledInfo.NSAccessibilityUsageDescription !== undefined ||
-    bundledInfo.CFBundleIconFile !== appIconBundleName ||
-    bundledInfo.tsInputMethodIconFileKey !== appIconFileName ||
-    modeInfo?.tsInputModeMenuIconFileKey !== menuIconFileName ||
-    modeInfo?.tsInputModePaletteIconFileKey !== menuIconFileName ||
-    modeInfo?.tsInputModeAlternateMenuIconFileKey !== menuIconFileName ||
-    !existsSync(join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", appIconFileName)) ||
-    !existsSync(join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", appIconBundleName)) ||
-    !existsSync(join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", menuIconFileName))
-  ) {
-    throw new Error("输入法包不得声明辅助功能用途；注册页与菜单模式图标必须保持独立");
-  }
-}
-
 // 商业构建只能包含项目自有和已核实宽松许可证的 Rime 数据，禁止旧 LGPL 词典重新混入。
 function verifyCommercialRimeDataContract() {
-  const rimeDataDirectory = join(buildRoot, "TypingDongnanya.app", "Contents", "Resources", "RimeData");
+  const rimeDataDirectory = join(buildRoot, "TypingChao.app", "Contents", "Resources", "RimeData");
   const bundledFileNameList = readdirSync(rimeDataDirectory);
   const requiredFileNameList = [
     "default.yaml",
@@ -864,7 +703,7 @@ function verifyCommercialRimeDataContract() {
 
 // 本地测试包使用稳定的显式 designated requirement，避免每次 ad-hoc 构建都生成新的 TCC 身份。
 function verifyStableDevelopmentCodeRequirement() {
-  const appPath = join(buildRoot, "TypingDongnanya.app");
+  const appPath = join(buildRoot, "TypingChao.app");
   const result = spawnSync("/usr/bin/codesign", ["-dr", "-", appPath], {
     encoding: "utf8",
   });
@@ -873,7 +712,7 @@ function verifyStableDevelopmentCodeRequirement() {
   }
   const requirementOutput = `${result.stdout}${result.stderr}`;
   const expectedRequirement =
-    'designated => identifier "com.caizhichao.typing-dongnanya.inputmethod.TypingDongnanya"';
+    'designated => identifier "com.caizhichao.typingchao.inputmethod.TypingChao"';
   if (
     !requirementOutput.includes(expectedRequirement) ||
     requirementOutput.includes("designated => cdhash")
@@ -882,12 +721,42 @@ function verifyStableDevelopmentCodeRequirement() {
   }
 }
 
+// 翻译客户端必须直连 DeepSeek 官方 HTTPS，不能把代理地址或 Key 写进输入法包。
+function verifyBundledTranslationEndpoint() {
+  const bundleInfoPath = join(buildRoot, "TypingChao.app", "Contents", "Info.plist");
+  const translationServiceSource = readFileSync(
+    join(sourceRoot, "TranslationService.swift"),
+    "utf8",
+  );
+  const bundledInfo = readInfoPlist(bundleInfoPath);
+  const menuIconFileName = "TypingChaoMenuIconV4.pdf";
+  const appIconFileName = "TypingChaoAppIcon.pdf";
+  const appIconBundleName = "TypingChaoAppIcon.icns";
+  const modeInfo = bundledInfo.ComponentInputModeDict?.tsInputModeListKey?.[
+    "com.caizhichao.typingchao.inputmethod.TypingChao.Pinyin"
+  ];
+  if (
+    !translationServiceSource.includes('https://api.deepseek.com/chat/completions') ||
+    translationServiceSource.includes("http://") ||
+    translationServiceSource.includes("proxyAccessToken") ||
+    bundledInfo.NSAccessibilityUsageDescription !== undefined ||
+    bundledInfo.CFBundleIconFile !== appIconBundleName ||
+    bundledInfo.tsInputMethodIconFileKey !== appIconFileName ||
+    modeInfo?.tsInputModeMenuIconFileKey !== menuIconFileName ||
+    modeInfo?.tsInputModePaletteIconFileKey !== menuIconFileName ||
+    modeInfo?.tsInputModeAlternateMenuIconFileKey !== menuIconFileName ||
+    !existsSync(join(buildRoot, "TypingChao.app", "Contents", "Resources", appIconFileName)) ||
+    !existsSync(join(buildRoot, "TypingChao.app", "Contents", "Resources", appIconBundleName)) ||
+    !existsSync(join(buildRoot, "TypingChao.app", "Contents", "Resources", menuIconFileName))
+  ) {
+    throw new Error("输入法包必须直连 DeepSeek HTTPS，并保持注册页和菜单模式图标分离");
+  }
+}
+
 // 通用模型不得把重复句当成冗余内容压缩，翻译提示必须明确保持句数、顺序和重复次数。
 function verifyTranslationPromptContract() {
   const translationServiceSource = readFileSync(
-    join(sourceRoot,
-      "TranslationService.swift",
-    ),
+    join(sourceRoot, "TranslationService.swift"),
     "utf8",
   );
   if (
@@ -898,19 +767,224 @@ function verifyTranslationPromptContract() {
   }
 }
 
-// 构建与测试统一读取部署脚本生成的本机 capability，不能把上游 AI 凭据写进包内。
-function readProxyAccessToken() {
-  if (!existsSync(proxyAccessTokenPath)) {
-    throw new Error("缺少本机翻译代理 capability 配置");
+// 候选条必须保留独立 AI 与设置按钮，点击后均由统一 InputMethodKit 生命周期处理。
+function verifyCandidateSettingsContract() {
+  const candidateSource = readFileSync(
+    join(sourceRoot, "CandidateOverlay.swift"),
+    "utf8",
+  );
+  const mainSource = readFileSync(
+    join(sourceRoot, "main.swift"),
+    "utf8",
+  );
+  const settingsSource = readFileSync(
+    join(sourceRoot, "InputMethodSettingsWindow.swift"),
+    "utf8",
+  );
+  const inputModeStatusSource = readFileSync(
+    join(sourceRoot, "InputModeStatusOverlay.swift"),
+    "utf8",
+  );
+  const controllerSource = readFileSync(
+    join(sourceRoot, "InputMethodController.swift"),
+    "utf8",
+  );
+  if (
+    !candidateSource.includes("CandidateAIInputButton") ||
+    !candidateSource.includes("setAIInputHandler") ||
+    !candidateSource.includes("CandidateSettingsButton") ||
+    !candidateSource.includes('systemSymbolName: "gearshape"') ||
+    !candidateSource.includes("aiInputButtonRect") ||
+    !candidateSource.includes("打开 AI 输入") ||
+    candidateSource.includes('NSString(string: "⌄")') ||
+    candidateSource.includes('NSString(string: "⚙︎")')
+  ) {
+    throw new Error("候选条尾部必须保留独立的 AI 与设置按钮");
   }
-  const accessToken = readFileSync(proxyAccessTokenPath, "utf8").trim();
-  if (!/^[a-f0-9]{48}$/i.test(accessToken)) {
-    throw new Error("本机翻译代理 capability 格式无效");
+  if (!mainSource.includes("TypingChaoApplicationDelegate.shared")) {
+    throw new Error("输入法进程必须由统一 AppKit delegate 管理设置窗口生命周期");
   }
-  return accessToken;
+  if (
+    !settingsSource.includes("拼音方案") ||
+    !settingsSource.includes("schemaPopUpButton") ||
+    !settingsSource.includes("schemaHandler") ||
+    !settingsSource.includes("字符宽度") ||
+    !settingsSource.includes("标点样式") ||
+    !settingsSource.includes("Shift + Space")
+  ) {
+    throw new Error("设置页必须把半/全角、标点样式和快捷切换分开说明");
+  }
+  if (
+    !settingsSource.includes("通用 AI 输入法") ||
+    !settingsSource.includes("CFBundleShortVersionString") ||
+    !settingsSource.includes("CFBundleVersion")
+  ) {
+    throw new Error("设置侧栏必须显示产品能力和当前安装包版本");
+  }
+  const appearanceRefreshCount = settingsSource.split("override func viewDidChangeEffectiveAppearance()").length - 1;
+  const appearanceResolutionCount = settingsSource.split("performAsCurrentDrawingAppearance").length - 1;
+  if (
+    !settingsSource.includes("let rootView = SettingsRootView()") ||
+    !settingsSource.includes("label.textColor = .labelColor") ||
+    appearanceRefreshCount < 3 ||
+    appearanceResolutionCount < 3
+  ) {
+    throw new Error("设置页背景、卡片和侧栏必须与原生控件使用同一套动态明暗外观");
+  }
+  if (
+    !candidateSource.includes("CandidateBarTrailingLayout") ||
+    !candidateSource.includes("drawTrailingSeparator()")
+  ) {
+    throw new Error("候选条分页、AI 与设置区必须使用独立布局和可见分隔");
+  }
+  if (
+    !settingsSource.includes("window?.level = .normal") ||
+    settingsSource.includes("window?.orderFrontRegardless()")
+  ) {
+    throw new Error("设置窗口必须使用标准窗口层级，不能永久悬浮在其它应用上方");
+  }
+  if (!settingsSource.includes("InputMethodSettings.shared.persistRimeOptionStateList(optionStateList)")) {
+    throw new Error("设置窗口失去当前输入控制器时仍必须保存 Rime 选项供下次会话恢复");
+  }
+  if (!inputModeStatusSource.includes("translationOrigin(for: panelSize, candidateFrame: candidateFrame)")) {
+    throw new Error("半/全角状态提示必须避开当前候选条，不能复用同一候选位置");
+  }
+  if (!controllerSource.includes("candidateFrame: translationOverlay.visibleFrame")) {
+    throw new Error("非组字状态提示必须同时避让已有译文卡");
+  }
 }
 
-// 打包元数据需要同时覆盖端点、ATS 和输入源图标，避免只验证其中一项而漏掉运行时断链。
+// AI 入口由候选条、菜单和输入法内部等号候选触发，不能依赖宿主可能截获的全局组合键。
+function verifyAIInputContract() {
+  const controllerSource = readFileSync(
+    join(sourceRoot, "InputMethodController.swift"),
+    "utf8",
+  );
+  const candidateSource = readFileSync(
+    join(sourceRoot, "CandidateOverlay.swift"),
+    "utf8",
+  );
+  const commandSource = readFileSync(
+    join(sourceRoot, "AIInputCommand.swift"),
+    "utf8",
+  );
+  const overlaySource = readFileSync(
+    join(sourceRoot, "AIInputOverlay.swift"),
+    "utf8",
+  );
+  const settingsSource = readFileSync(
+    join(sourceRoot, "InputMethodSettings.swift"),
+    "utf8",
+  );
+  const settingsWindowSource = readFileSync(
+    join(sourceRoot, "InputMethodSettingsWindow.swift"),
+    "utf8",
+  );
+  const menuSource = readFileSync(
+    join(sourceRoot, "InputMethodMenu.swift"),
+    "utf8",
+  );
+  const translationServiceSource = readFileSync(
+    join(sourceRoot, "TranslationService.swift"),
+    "utf8",
+  );
+  for (const requiredContract of [
+    "setAIInputHandler",
+    "AIInputCommandState",
+    "aiInputCommandState.consume",
+    "updateAIInputCommandMarkedText",
+    "commitPendingAIInputCommand",
+    "discardPendingAIInputCommand",
+    "showAIInputTrigger",
+    "isTriggerReady",
+    'keyName == "1"',
+    'keyName == "Return"',
+    "!currentRimeSnapshot.isAsciiMode",
+    "showAIInput()",
+    "requestAIInput(promptText:",
+    "commitAIInputResult(resultText:",
+    "presentAIInput(client: client, anchor:",
+    "aiInputOverlay.show(anchor: anchor)",
+    "activeAIInputController",
+    "aiInputOverlay.isVisible",
+    "isPresentingAIInput",
+    "guard !isActiveAIInputController else",
+    "handleAIInputKey(",
+    "updateAIInputOverlay(client: client, snapshot: snapshot)",
+    "aiInputOverlay.acceptsPromptInput",
+    "aiInputOverlay.submitPrompt()",
+  ]) {
+    if (!controllerSource.includes(requiredContract)) {
+      throw new Error("macOS AI 输入缺少内部入口或单轮收口契约：" + requiredContract);
+    }
+  }
+  if (
+    !candidateSource.includes("CandidateAIInputButton") ||
+    !candidateSource.includes("openAIInput") ||
+    !candidateSource.includes("aiInputButtonRect") ||
+    !candidateSource.includes('labelText: "1"') ||
+    !candidateSource.includes("打开 AI 输入") ||
+    !menuSource.includes('title: "AI 输入…"') ||
+    !menuSource.includes('keyEquivalent: ""')
+  ) {
+    throw new Error("候选条和输入法菜单必须提供明确、无快捷键依赖的 AI 入口");
+  }
+  if (
+    !commandSource.includes('static let triggerText = "="') ||
+    !commandSource.includes("updateMarkedText") ||
+    !commandSource.includes("commitMarkedText") ||
+    !commandSource.includes("flushPendingText") ||
+    !commandSource.includes("deleteBackward")
+  ) {
+    throw new Error("AI 快速命令必须正常显示等号，并在未确认时按普通文本提交");
+  }
+  for (const removedToken of [
+    "AIInputGesturePolicy",
+    "AIInputShortcut",
+    "optionSpace",
+    "TypingChaoAITrace",
+    "typingchao-ai-trace.log",
+  ]) {
+    if (
+      controllerSource.includes(removedToken) ||
+      overlaySource.includes(removedToken) ||
+      settingsSource.includes(removedToken) ||
+      settingsWindowSource.includes(removedToken)
+    ) {
+      throw new Error("AI 输入不应保留失效快捷键或临时诊断：" + removedToken);
+    }
+  }
+  if (
+    !overlaySource.includes("panel.center()") ||
+    !overlaySource.includes("panel.orderFrontRegardless()") ||
+    !overlaySource.includes("override var canBecomeKey") ||
+    !overlaySource.includes("每次请求独立处理") ||
+    !translationServiceSource.includes("不包含任何历史对话")
+  ) {
+    throw new Error("AI 输入必须保持单次请求，并且不能抢占原宿主 IMK 会话");
+  }
+  for (const forbiddenFocusToken of [
+    "makeKeyAndOrderFront",
+    "makeFirstResponder",
+    "NSTextFieldDelegate",
+  ]) {
+    if (overlaySource.includes(forbiddenFocusToken)) {
+      throw new Error("AI 输入面板不得再创建独立文本焦点：" + forbiddenFocusToken);
+    }
+  }
+  for (const forbiddenToken of [
+    "addGlobalMonitorForEvents",
+    "CGEvent.tapCreate",
+    "CGEventSource.keyState",
+    "AXUIElement",
+  ]) {
+    if (controllerSource.includes(forbiddenToken) || overlaySource.includes(forbiddenToken)) {
+      throw new Error("AI 输入不得引入全局键盘或辅助功能监听：" + forbiddenToken);
+    }
+  }
+}
+
+// 打包元数据和输入源图标一起校验，避免已下线的代理配置重新进入交付包。
 function readInfoPlist(infoPath: string): BundledInfo {
   return JSON.parse(runText("plutil", [
     "-convert",
@@ -922,9 +996,8 @@ function readInfoPlist(infoPath: string): BundledInfo {
 }
 
 type BundledInfo = {
+  CFBundleDisplayName?: string;
   CFBundleIconFile?: string;
-  TypingDongnanyaAPIBaseEndpoint?: string;
-  TypingDongnanyaAPIEndpoint?: string;
   ComponentInputModeDict?: {
     tsInputModeListKey?: Record<string, {
       tsInputModeMenuIconFileKey?: string;
@@ -934,17 +1007,15 @@ type BundledInfo = {
   };
   tsInputMethodIconFileKey?: string;
   NSAccessibilityUsageDescription?: string;
-  NSAppTransportSecurity?: {
-    NSAllowsArbitraryLoads?: boolean;
-    NSExceptionDomains?: Record<string, {
-      NSExceptionAllowsInsecureHTTPLoads?: boolean;
-    }>;
-  };
 };
 
 function run(command: string, args: string[]) {
-  console.log(`$ ${command} ${args.join(" ")}`);
-  const result = spawnSync(command, args, { cwd: projectRoot, stdio: "inherit" });
+  let resolvedArguments = args;
+  if (command === "swiftc") {
+    resolvedArguments = ["-module-cache-path", swiftModuleCacheRoot, ...args];
+  }
+  console.log(`$ ${command} ${resolvedArguments.join(" ")}`);
+  const result = spawnSync(command, resolvedArguments, { cwd: projectRoot, stdio: "inherit" });
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 

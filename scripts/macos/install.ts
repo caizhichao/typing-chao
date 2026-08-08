@@ -6,14 +6,14 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const projectRoot = resolve(import.meta.dir, "../..");
-const sourceApp = join(projectRoot, "platforms", "macos", "build", "TypingDongnanya.app");
+const sourceApp = join(projectRoot, "platforms", "macos", "build", "TypingChao.app");
 const userInputMethodsRoot = join(homedir(), "Library", "Input Methods");
-const oldUserApp = join(userInputMethodsRoot, "TypingDongnanya.app");
+const oldUserApp = join(userInputMethodsRoot, "TypingChao.app");
 const systemInputMethodsRoot = "/Library/Input Methods";
-const destinationApp = join(systemInputMethodsRoot, "TypingDongnanya.app");
+const destinationApp = join(systemInputMethodsRoot, "TypingChao.app");
 
 if (!existsSync(sourceApp)) {
-  console.error("找不到 platforms/macos/build/TypingDongnanya.app，请先执行 bun run build:macos");
+  console.error("找不到 platforms/macos/build/TypingChao.app，请先执行 bun run build:macos");
   process.exit(1);
 }
 
@@ -22,7 +22,7 @@ if (existsSync(oldUserApp)) {
   rmSync(oldUserApp, { recursive: true, force: true });
 }
 
-const systemExecutable = join(destinationApp, "Contents", "MacOS", "TypingDongnanya");
+const systemExecutable = join(destinationApp, "Contents", "MacOS", "TypingChao");
 const installCommand = [
   `/bin/mkdir -p ${shellQuote(systemInputMethodsRoot)}`,
   `/usr/bin/rsync -a --delete ${shellQuote(`${sourceApp}/`)} ${shellQuote(`${destinationApp}/`)}`,
@@ -39,11 +39,11 @@ restartTextInputMenuAgent();
 run(systemExecutable, ["--input-source-status"]);
 
 console.log(`已安装到系统输入法目录：${destinationApp}`);
-console.log("已请求退出旧的输入法进程；请切换到其它输入法后再切回 Typing 东南亚，以启动新版本。");
+console.log("已请求退出旧的输入法进程；请切换到其它输入法后再切回 Typing Chao，以启动新版本。");
 console.log("当前版本由输入法内部 marked draft 持有完整原文；使用译文或上屏原文后才一次性提交，不扫描宿主正文，也不申请辅助功能或输入监控权限。");
-console.log("请在系统设置 -> 键盘 -> 文本输入 -> 编辑 -> + 中搜索“中文”或“Chinese”，再在中文输入法列表选择 Typing 东南亚；不要搜索产品名“东南亚”。");
+console.log("请在系统设置 -> 键盘 -> 文本输入 -> 编辑 -> + 中搜索“中文”或“Chinese”，再在中文输入法列表选择 Typing Chao；不要只搜索产品名。");
 
-// 已有系统包归当前用户且可写时直接原位更新，首次安装或受保护包才请求管理员授权。
+// 已有系统包归当前用户且可写时直接原位更新，首次安装或需要清理旧系统包时请求管理员授权。
 function isWritableExistingInstallation() {
   if (!existsSync(destinationApp)) return false;
   try {
@@ -67,7 +67,11 @@ function runAdministratorCommand(command: string) {
 
 function restartInstalledInputMethod() {
   // 安装只替换磁盘包；已运行的 InputMethodKit 进程仍会映射旧二进制，须由用户切换输入源后重启。
-  const result = spawnSync("/usr/bin/pgrep", ["-f", `^${systemExecutable}$`], { encoding: "utf8" });
+  stopInputMethod(systemExecutable);
+}
+
+function stopInputMethod(executablePath: string) {
+  const result = spawnSync("/usr/bin/pgrep", ["-f", `^${executablePath}$`], { encoding: "utf8" });
   if (result.status !== 0) return;
   for (const pid of String(result.stdout ?? "").trim().split("\n")) {
     if (!pid) continue;

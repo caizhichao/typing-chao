@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.31.6)
 
-project(typing_dongnanya_rime LANGUAGES C CXX)
+project(typing_chao_rime LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -141,10 +141,10 @@ target_link_libraries(rime_android
         marisa
         opencc_runtime)
 
-add_library(typing_dongnanya_rime SHARED rime_jni.cpp)
-target_include_directories(typing_dongnanya_rime PRIVATE
+add_library(typing_chao_rime SHARED rime_jni.cpp)
+target_include_directories(typing_chao_rime PRIVATE
     "${RIME_GENERATED_INCLUDE_ROOT}"
     "${LIBRIME_ROOT}/src"
     "${LIBRIME_ROOT}/include")
-target_compile_options(typing_dongnanya_rime PRIVATE -Wall -Wextra -Werror)
-target_link_libraries(typing_dongnanya_rime PRIVATE rime_android android log)
+target_compile_options(typing_chao_rime PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(typing_chao_rime PRIVATE rime_android android log)

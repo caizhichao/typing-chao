@@ -14,17 +14,18 @@ const gradleWrapperPath = join(androidRoot, "gradlew");
 const debugApkPath = join(androidRoot, "app", "build", "outputs", "apk", "debug", "app-debug.apk");
 const aaptPath = join(androidSdkRoot, "build-tools", "36.0.0", "aapt2");
 const apkSignerPath = join(androidSdkRoot, "build-tools", "36.0.0", "apksigner");
-const inputMethodServicePath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingdongnanya", "ime", "TypingDongnanyaInputMethodService.kt");
-const keyboardViewPath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingdongnanya", "ui", "TypingKeyboardView.kt");
-const settingsActivityPath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingdongnanya", "settings", "SettingsActivity.kt");
-const settingsStorePath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingdongnanya", "settings", "SettingsStore.kt");
-const inputSchemaPath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingdongnanya", "settings", "InputSchema.kt");
-const keyboardUiStatePath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingdongnanya", "ui", "KeyboardUiState.kt");
-const handwritingCanvasPath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingdongnanya", "ui", "HandwritingCanvasView.kt");
-const handwritingRecognizerPath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingdongnanya", "handwriting", "HandwritingRecognizer.kt");
-const handwritingDecoderPath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingdongnanya", "handwriting", "HandwritingCtcDecoder.kt");
-const keyboardInputModePath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingdongnanya", "settings", "KeyboardInputMode.kt");
-const rimeNativePath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingdongnanya", "rime", "RimeNative.kt");
+const inputMethodServicePath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingchao", "ime", "TypingChaoInputMethodService.kt");
+const keyboardViewPath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingchao", "ui", "TypingKeyboardView.kt");
+const settingsActivityPath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingchao", "settings", "SettingsActivity.kt");
+const settingsStorePath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingchao", "settings", "SettingsStore.kt");
+const translationClientPath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingchao", "translation", "TranslationClient.kt");
+const inputSchemaPath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingchao", "settings", "InputSchema.kt");
+const keyboardUiStatePath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingchao", "ui", "KeyboardUiState.kt");
+const handwritingCanvasPath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingchao", "ui", "HandwritingCanvasView.kt");
+const handwritingRecognizerPath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingchao", "handwriting", "HandwritingRecognizer.kt");
+const handwritingDecoderPath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingchao", "handwriting", "HandwritingCtcDecoder.kt");
+const keyboardInputModePath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingchao", "settings", "KeyboardInputMode.kt");
+const rimeNativePath = join(androidRoot, "app", "src", "main", "kotlin", "com", "caizhichao", "typingchao", "rime", "RimeNative.kt");
 const rimeJniPath = join(androidRoot, "app", "src", "main", "cpp", "rime_jni.cpp");
 
 run(process.execPath, [buildScriptPath], projectRoot);
@@ -36,12 +37,13 @@ for (const requiredPath of [debugApkPath, aaptPath, apkSignerPath]) {
 }
 
 const badgingText = runText(aaptPath, ["dump", "badging", debugApkPath]);
-assertIncludes(badgingText, "package: name='com.caizhichao.typingdongnanya'");
-assertIncludes(badgingText, "versionCode='8' versionName='0.3.2'");
+assertIncludes(badgingText, "package: name='com.caizhichao.typingchao'");
+assertIncludes(badgingText, "versionCode='9' versionName='0.3.3'");
+assertIncludes(badgingText, "application-label:'Typing Chao'");
 assertIncludes(badgingText, "minSdkVersion:'26'");
 assertIncludes(badgingText, "targetSdkVersion:'36'");
 assertIncludes(badgingText, "provides-component:'ime'");
-assertIncludes(badgingText, "launchable-activity: name='com.caizhichao.typingdongnanya.settings.SettingsActivity'");
+assertIncludes(badgingText, "launchable-activity: name='com.caizhichao.typingchao.settings.SettingsActivity'");
 
 const entryList = runText("unzip", ["-Z1", debugApkPath]).split("\n").filter(Boolean);
 const nativeEntryList = entryList.filter((entryValue) => entryValue.startsWith("lib/"));
@@ -49,7 +51,7 @@ const expectedNativeEntryList = [
   "lib/arm64-v8a/libc++_shared.so",
   "lib/arm64-v8a/libonnxruntime.so",
   "lib/arm64-v8a/libonnxruntime4j_jni.so",
-  "lib/arm64-v8a/libtyping_dongnanya_rime.so",
+  "lib/arm64-v8a/libtyping_chao_rime.so",
 ];
 if (nativeEntryList.join("\n") !== expectedNativeEntryList.join("\n")) {
   throw new Error(`APK 原生库或 ABI 不符合 arm64-v8a 单架构约束：\n${nativeEntryList.join("\n")}`);
@@ -223,6 +225,7 @@ if (clearCompositionBody.includes("onClearDraft")) {
 
 const settingsActivityText = readFileSync(settingsActivityPath, "utf8");
 const settingsStoreText = readFileSync(settingsStorePath, "utf8");
+const translationClientText = readFileSync(translationClientPath, "utf8");
 const inputSchemaText = readFileSync(inputSchemaPath, "utf8");
 const keyboardUiStateText = readFileSync(keyboardUiStatePath, "utf8");
 const rimeNativeText = readFileSync(rimeNativePath, "utf8");
@@ -235,6 +238,10 @@ for (const schemaContract of [
 }
 assertIncludes(settingsStoreText, 'const val inputSchemaIdentifierKey = "input_schema_identifier"');
 assertIncludes(settingsStoreText, 'const val keyboardInputModeKey = "keyboard_input_mode"');
+assertIncludes(settingsStoreText, 'const val deepSeekAPIKeyKey = "deepseek_api_key"');
+assertIncludes(settingsActivityText, "deepSeekAPIKeyInput");
+assertIncludes(translationClientText, 'private const val deepSeekEndpoint = "https://api.deepseek.com/chat/completions"');
+assertIncludes(translationClientText, 'setRequestProperty("Authorization", "Bearer $configuredAPIKey")');
 assertIncludes(inputSchemaText, 'NINE_KEY_PINYIN("typing_pinyin_t9", "中文九键")');
 assertIncludes(inputSchemaText, 'WUBI_86("typing_wubi86", "五笔 86")');
 assertIncludes(keyboardUiStateText, "val isNineKeyLayout: Boolean");
@@ -301,11 +308,11 @@ const unpackedApkText = unpackedApkValue.toString("latin1");
 if (/sk-[A-Za-z0-9_-]{12,}/.test(unpackedApkText)) {
   throw new Error("APK 中检测到上游 sk 凭据模式");
 }
-if (unpackedApkText.includes("api.deepseek.com")) {
-  throw new Error("APK 中不应包含 DeepSeek 上游地址");
+if (!unpackedApkText.includes("api.deepseek.com")) {
+  throw new Error("APK 中缺少 DeepSeek 官方翻译地址");
 }
-if (!/https:\/\/114\.132\.185\.123\/typing-dongnanya-api\/v1\/chat\/completions\/[A-Za-z0-9_-]{48}/.test(unpackedApkText)) {
-  throw new Error("APK 中没有构建期注入的 HTTPS capability 地址");
+if (unpackedApkText.includes("114.132.185.123") || unpackedApkText.includes("typingchao-api")) {
+  throw new Error("APK 中不应包含已下线的翻译代理地址");
 }
 
 const signatureText = runText(apkSignerPath, ["verify", "--verbose", "--print-certs", debugApkPath], {
@@ -315,7 +322,7 @@ assertIncludes(signatureText, "Verifies");
 assertIncludes(signatureText, "Verified using v2 scheme (APK Signature Scheme v2): true");
 
 const apkHash = createHash("sha256").update(readFileSync(debugApkPath)).digest("hex");
-console.log("Android APK 验证通过：包名、IME/设置入口、arm64 原生库、Rime/OpenCC 数据、第三方许可证、HTTPS capability 与凭据边界均符合约束。");
+console.log("Android APK 验证通过：包名、IME/设置入口、arm64 原生库、Rime/OpenCC 数据、第三方许可证、DeepSeek 直连与本地 Key 配置边界均符合约束。");
 console.log(`APK SHA-256：${apkHash}`);
 
 function run(command: string, args: string[], cwd: string) {
