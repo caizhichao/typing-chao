@@ -30,12 +30,14 @@ verifyStableDevelopmentCodeRequirement();
 verifyBundledTranslationEndpoint();
 verifyTranslationPromptContract();
 verifyAIInputContract();
+verifyAPIKeyPasteContract();
 verifyInputControllerLifecycleContract();
 verifyInputLatencyContract();
 verifyClipboardOnlyTranslationContract();
 verifyEscapeClearContract();
 verifyDirectSymbolContract();
 verifyKnownPassThroughContract();
+verifyShiftKeyContract();
 verifyNoExternalPermissionContract();
 verifyCandidateSettingsContract();
 mkdirSync(testBinaryRoot, { recursive: true });
@@ -107,6 +109,29 @@ run("swiftc", [
   settingsSmokeOutputPath,
 ]);
 run(settingsSmokeOutputPath, []);
+
+const localResponsesAPIKey = process.env.TYPINGCHAO_LOCAL_AI_KEY;
+const translationServiceSmokeOutputPath = join(testBinaryRoot, "TranslationServiceSmoke");
+run("swiftc", [
+  "-target",
+  `${architecture}-apple-macosx13.0`,
+  "-sdk",
+  sdkPath,
+  join(sourceRoot, "InputMethodSettings.swift"),
+  join(sourceRoot, "TranslationService.swift"),
+  join(testRoot, "TranslationServiceSmoke.swift"),
+  "-o",
+  translationServiceSmokeOutputPath,
+]);
+if (localResponsesAPIKey) {
+  runWithEnvironment(
+    translationServiceSmokeOutputPath,
+    [],
+    { TYPINGCHAO_LOCAL_AI_KEY: localResponsesAPIKey },
+  );
+} else {
+  console.log("跳过本地 Codex Responses 网络冒烟：未设置 TYPINGCHAO_LOCAL_AI_KEY");
+}
 
 const rimeInputPolicySmokeOutputPath = join(testBinaryRoot, "RimeInputPolicySmoke");
 run("swiftc", [
@@ -235,6 +260,7 @@ run("swiftc", [
   sdkPath,
   join(sourceRoot, "OverlayLayout.swift"),
   join(sourceRoot, "InputMethodSettings.swift"),
+  join(sourceRoot, "TranslationService.swift"),
   join(sourceRoot, "AIInputOverlay.swift"),
   join(testRoot, "AIInputOverlaySmoke.swift"),
   "-framework",
@@ -247,6 +273,19 @@ run("swiftc", [
   aiInputOverlaySmokeOutputPath,
 ]);
 run(aiInputOverlaySmokeOutputPath, []);
+
+const aiInputSelectionSmokeOutputPath = join(testBinaryRoot, "AIInputSelectionSmoke");
+run("swiftc", [
+  "-target",
+  `${architecture}-apple-macosx13.0`,
+  "-sdk",
+  sdkPath,
+  join(sourceRoot, "AIInputSelection.swift"),
+  join(testRoot, "AIInputSelectionSmoke.swift"),
+  "-o",
+  aiInputSelectionSmokeOutputPath,
+]);
+run(aiInputSelectionSmokeOutputPath, []);
 
 const aiInputCommandSmokeOutputPath = join(testBinaryRoot, "AIInputCommandSmoke");
 run("swiftc", [
@@ -374,7 +413,7 @@ function verifyInputControllerLifecycleContract() {
   }
 }
 
-// 输入按键主路径不得启动跨进程监听、读取宿主正文或执行常驻轮询。
+// 输入按键主路径不得启动跨进程监听或读取宿主全文；仅允许读取用户当前明确选区。
 function verifyInputLatencyContract() {
   const controllerSource = readFileSync(
     join(sourceRoot, "InputMethodController.swift"),
@@ -416,7 +455,7 @@ function verifyInputLatencyContract() {
   }
 }
 
-// 剪贴板和键盘确认文本都必须先进入输入法内部 marked draft，再由用户一次性提交。
+// 剪贴板和键盘确认文本都必须先进入输入法内部 marked draft，再由用户一次性提交；AI 仅允许读取明确选区。
 function verifyClipboardOnlyTranslationContract() {
   const controllerSource = readFileSync(
     join(sourceRoot, "InputMethodController.swift"),
@@ -457,6 +496,10 @@ function verifyClipboardOnlyTranslationContract() {
   const markedTextBody = swiftMethodBody(
     controllerSource,
     "private func markedText(for snapshot:",
+  );
+  const selectedSelectionBody = swiftMethodBody(
+    controllerSource,
+    "private func selectedAIInputSelectionContext(from client:",
   );
   if (
     !clipboardBody.includes("NSPasteboard.general.string(forType: .string)") ||
@@ -518,7 +561,8 @@ function verifyClipboardOnlyTranslationContract() {
     !originalCommitBody.includes("translationDraft.textValue") ||
     !originalCommitBody.includes("replacementRange: NSRange(location: NSNotFound") ||
     !markedTextBody.includes("draftText + snapshot.preeditText") ||
-    controllerSource.includes("attributedSubstring(from:") ||
+    !selectedSelectionBody.includes("client.selectedRange()") ||
+    !selectedSelectionBody.includes("client.attributedSubstring(from: selectedRange)") ||
     controllerSource.includes("TranslationReplacementPolicy")
   ) {
     throw new Error("译文与原文必须从内部 marked draft 一次性提交，禁止继续追溯替换宿主正文");
@@ -612,6 +656,54 @@ function verifyKnownPassThroughContract() {
   }
   if (!controllerSource.includes("handleUnhandledKey(keyName, client: client)")) {
     throw new Error("唯一原始事件入口必须把客户端交给直通文本处理链");
+  }
+}
+
+// Shift 单键是 Rime 的明确空操作，不能因键码未映射而提前提交翻译草稿；Shift+Space 仍由 Rime 处理全半角切换。
+function verifyShiftKeyContract() {
+  const controllerSource = readFileSync(
+    join(sourceRoot, "InputMethodController.swift"),
+    "utf8",
+  );
+  const keyNameBody = swiftMethodBody(
+    controllerSource,
+    "private func keyName(for keyCode: Int)",
+  );
+  const unhandledKeyBody = swiftMethodBody(
+    controllerSource,
+    "private func handleUnhandledKey(_ keyName: String, client:",
+  );
+  if (
+    !keyNameBody.includes('case 56: return "Shift_L"') ||
+    !keyNameBody.includes('case 60: return "Shift_R"') ||
+    !unhandledKeyBody.includes('if keyName == "Shift_L" || keyName == "Shift_R"') ||
+    !unhandledKeyBody.includes("return false")
+  ) {
+    throw new Error("macOS Shift 键必须映射为 Rime 的 Shift_L/Shift_R 空操作，不能误提交翻译草稿");
+  }
+  const defaultRimeSource = readFileSync(
+    join(projectRoot, "shared", "RimeData", "default.yaml"),
+    "utf8",
+  );
+  if (!defaultRimeSource.includes("accept: Shift+space, toggle: full_shape")) {
+    throw new Error("Shift+Space 必须保留为 Rime 全半角切换绑定");
+  }
+  const eventBody = swiftMethodBody(
+    controllerSource,
+    "override func handle(_ event: NSEvent!, client sender: Any!)",
+  );
+  const shiftedCharacterBody = swiftMethodBody(
+    controllerSource,
+    "private func shiftedCharacterKeyName(for event: NSEvent)",
+  );
+  if (
+    !eventBody.includes("shiftedCharacterKeyName(for: event)") ||
+    !eventBody.includes("modifiers: []") ||
+    !shiftedCharacterBody.includes("event.characters") ||
+    !shiftedCharacterBody.includes("event.charactersIgnoringModifiers") ||
+    !shiftedCharacterBody.includes("CharacterSet.letters")
+  ) {
+    throw new Error("Shift 加字母或标点必须使用实际字符重新交给 Rime，不能丢失大写输入");
   }
 }
 
@@ -721,7 +813,7 @@ function verifyStableDevelopmentCodeRequirement() {
   }
 }
 
-// 翻译客户端必须直连 DeepSeek 官方 HTTPS，不能把代理地址或 Key 写进输入法包。
+// 翻译客户端必须使用已确认的 DeepSeek 官方 HTTPS 或本机 Codex Responses 端点。
 function verifyBundledTranslationEndpoint() {
   const bundleInfoPath = join(buildRoot, "TypingChao.app", "Contents", "Info.plist");
   const translationServiceSource = readFileSync(
@@ -737,7 +829,9 @@ function verifyBundledTranslationEndpoint() {
   ];
   if (
     !translationServiceSource.includes('https://api.deepseek.com/chat/completions') ||
-    translationServiceSource.includes("http://") ||
+    (!translationServiceSource.includes('http://127.0.0.1:8317/v1/responses') ||
+      (translationServiceSource.includes("http://") &&
+        !translationServiceSource.includes('http://127.0.0.1:8317/v1/responses'))) ||
     translationServiceSource.includes("proxyAccessToken") ||
     bundledInfo.NSAccessibilityUsageDescription !== undefined ||
     bundledInfo.CFBundleIconFile !== appIconBundleName ||
@@ -749,7 +843,7 @@ function verifyBundledTranslationEndpoint() {
     !existsSync(join(buildRoot, "TypingChao.app", "Contents", "Resources", appIconBundleName)) ||
     !existsSync(join(buildRoot, "TypingChao.app", "Contents", "Resources", menuIconFileName))
   ) {
-    throw new Error("输入法包必须直连 DeepSeek HTTPS，并保持注册页和菜单模式图标分离");
+    throw new Error("输入法包必须使用 DeepSeek 官方 HTTPS 与本机 Codex Responses 端点，并保持注册页和菜单模式图标分离");
   }
 }
 
@@ -789,6 +883,24 @@ function verifyCandidateSettingsContract() {
     join(sourceRoot, "InputMethodController.swift"),
     "utf8",
   );
+  const aiCandidateMethodStart = controllerSource.indexOf(
+    "private func showAIInputCommandCandidate"
+  );
+  const aiCandidateMethodEnd = controllerSource.indexOf(
+    "private func discardPendingAIInputCommand",
+    aiCandidateMethodStart
+  );
+  const aiCandidateMethod = controllerSource.slice(
+    aiCandidateMethodStart,
+    aiCandidateMethodEnd
+  );
+  if (
+    !aiCandidateMethod.includes("fallbackAnchor ??") ||
+    !aiCandidateMethod.includes("allowsCachedAnchor: false")
+  ) {
+    throw new Error("AI 候选条必须优先使用本次等号输入前捕获的锚点");
+  }
+
   if (
     !candidateSource.includes("CandidateAIInputButton") ||
     !candidateSource.includes("setAIInputHandler") ||
@@ -890,21 +1002,36 @@ function verifyAIInputContract() {
   );
   for (const requiredContract of [
     "setAIInputHandler",
+    "AIInputSelectionContext",
+    "prefilledPromptText:",
+    "activeAIInputSelection",
     "AIInputCommandState",
-    "aiInputCommandState.consume",
-    "updateAIInputCommandMarkedText",
-    "commitPendingAIInputCommand",
+    "aiInputCommandState.activateTrigger",
+    "override func inputText",
+    "inputKeyName == AIInputCommandState.triggerText",
+    "if inputKeyName == \"Return\"",
+    "suppressNextHostReturnAfterAICommand",
+    "suppressNextInputTextEqualsCallback",
+    "suppressNextKeyDownEqualsCallback",
+    "keyName == AIInputCommandState.triggerText",
+    "return false",
+    "showAIInputCommandCandidate",
+    "processStandaloneEquals",
+    "markPendingAIInputEquals",
+    "if aiInputOverlay.isVisible",
     "discardPendingAIInputCommand",
     "showAIInputTrigger",
     "isTriggerReady",
     'keyName == "1"',
     'keyName == "Return"',
-    "!currentRimeSnapshot.isAsciiMode",
     "showAIInput()",
-    "requestAIInput(promptText:",
+    "private func requestAIInput(\n        promptText:",
     "commitAIInputResult(resultText:",
-    "presentAIInput(client: client, anchor:",
-    "aiInputOverlay.show(anchor: anchor)",
+    "presentAIInput(",
+    "selectionContext: resolvedSelectionContext",
+    "aiInputOverlay.show(",
+    "prefilledPromptText:",
+    "conversationMessageList: [AIConversationMessage]",
     "activeAIInputController",
     "aiInputOverlay.isVisible",
     "isPresentingAIInput",
@@ -917,7 +1044,7 @@ function verifyAIInputContract() {
     "aiInputOverlay.commitResult()",
   ]) {
     if (!controllerSource.includes(requiredContract)) {
-      throw new Error("macOS AI 输入缺少内部入口或单轮收口契约：" + requiredContract);
+      throw new Error("macOS AI 输入缺少内部入口或会话收口契约：" + requiredContract);
     }
   }
   if (
@@ -933,12 +1060,21 @@ function verifyAIInputContract() {
   }
   if (
     !commandSource.includes('static let triggerText = "="') ||
-    !commandSource.includes("updateMarkedText") ||
-    !commandSource.includes("commitMarkedText") ||
-    !commandSource.includes("flushPendingText") ||
-    !commandSource.includes("deleteBackward")
+    !commandSource.includes("activateTrigger") ||
+    !commandSource.includes("isTriggerReady") ||
+    !commandSource.includes("mutating func reset")
   ) {
-    throw new Error("AI 快速命令必须正常显示等号，并在未确认时按普通文本提交");
+    throw new Error("AI 快速命令只能由单个普通等号触发");
+  }
+  for (const removedCommandToken of [
+    "commitMarkedText",
+    "flushPendingText",
+    "deleteBackward",
+    "updateMarkedText",
+  ]) {
+    if (commandSource.includes(removedCommandToken)) {
+      throw new Error("AI 快速命令仍保留多字符前缀逻辑：" + removedCommandToken);
+    }
   }
   for (const removedToken of [
     "AIInputGesturePolicy",
@@ -958,23 +1094,67 @@ function verifyAIInputContract() {
   }
   if (
     !overlaySource.includes("panel.center()") ||
-    !overlaySource.includes("panel.orderFrontRegardless()") ||
+    !overlaySource.includes("panel.makeKeyAndOrderFront(nil)") ||
     !overlaySource.includes("override var canBecomeKey") ||
-    !overlaySource.includes("每次请求独立处理") ||
-    !overlaySource.includes("⌘Enter 上屏") ||
+    !overlaySource.includes("final class AIInputPromptView") ||
+    !overlaySource.includes("acceptsFirstResponder") ||
+    !overlaySource.includes("func focusPromptInput()") ||
+    !overlaySource.includes("func setKeyHandler(_ handler: @escaping (NSEvent) -> Bool)") ||
+    !overlaySource.includes("连续对话 · 当前会话保留上下文") ||
+    !overlaySource.includes("pendingPromptText") ||
+    !overlaySource.includes("conversationMessageList") ||
+    !overlaySource.includes("panelSize = NSSize(width: 520, height: 500)") ||
+    !overlaySource.includes("chatContainer.heightAnchor.constraint(equalToConstant: 380)") ||
+    !overlaySource.includes("scrollChatToVisibleContent") ||
+    !overlaySource.includes("usedHeight > visibleHeight + 1") ||
     !overlaySource.includes("func commitResult()") ||
-    !translationServiceSource.includes("不包含任何历史对话")
+    !overlaySource.includes("serviceProviderPopUpButton") ||
+    !overlaySource.includes("setServiceProviderHandler") ||
+    !translationServiceSource.includes("requestAIConversationResponse") ||
+    !translationServiceSource.includes("ResponsesConversationRequest") ||
+    !translationServiceSource.includes("inputMessageList")
   ) {
-    throw new Error("AI 输入必须保持单次请求，并且不能抢占原宿主 IMK 会话");
+    throw new Error("AI 输入必须保留当前会话上下文，并且把焦点交给面板内输入视图");
   }
-  for (const forbiddenFocusToken of [
-    "makeKeyAndOrderFront",
-    "makeFirstResponder",
-    "NSTextFieldDelegate",
+  for (const removedHintText of [
+    "Enter 重试 · Esc 关闭",
+    "Enter 发送 · ⌘Enter 上屏 · Esc 关闭",
+    'NSButton(title: "关闭"',
+    'NSButton(title: "发送"',
   ]) {
-    if (overlaySource.includes(forbiddenFocusToken)) {
-      throw new Error("AI 输入面板不得再创建独立文本焦点：" + forbiddenFocusToken);
+    if (overlaySource.includes(removedHintText)) {
+      throw new Error("AI 输入面板不应显示快捷键提示文案：" + removedHintText);
     }
+  }
+  for (const requiredServiceToken of [
+    "AIServiceProvider",
+    "codexResponses",
+    "TypingChaoAIServiceProvider",
+    "http://127.0.0.1:8317/v1/responses",
+    "ResponsesRequest",
+    "outputItemList",
+  ]) {
+    if (
+      !settingsSource.includes(requiredServiceToken) &&
+      !translationServiceSource.includes(requiredServiceToken)
+    ) {
+      throw new Error("AI 服务切换缺少 Responses 契约：" + requiredServiceToken);
+    }
+  }
+  if (
+    !translationServiceSource.includes("Key 无法使用") ||
+    !translationServiceSource.includes("Key 错误或无权限") ||
+    !settingsWindowSource.includes('"输入 \\(serviceProvider.apiKeyDisplayName)"')
+  ) {
+    throw new Error("AI Key 错误提示必须区分当前服务和 Key 状态");
+  }
+  if (
+    !controllerSource.includes("private func aiInputLiteralText(for event: NSEvent, keyName: String)") ||
+    !controllerSource.includes("aiInputLiteralText(for: event, keyName: keyName)") ||
+    !controllerSource.includes("aiInputOverlay.appendPromptText(literalText)") ||
+    !controllerSource.includes("CharacterSet.decimalDigits")
+  ) {
+    throw new Error("AI 输入面板必须允许数字、符号和空格作为普通文本输入");
   }
   for (const forbiddenToken of [
     "addGlobalMonitorForEvents",
@@ -984,6 +1164,27 @@ function verifyAIInputContract() {
   ]) {
     if (controllerSource.includes(forbiddenToken) || overlaySource.includes(forbiddenToken)) {
       throw new Error("AI 输入不得引入全局键盘或辅助功能监听：" + forbiddenToken);
+    }
+  }
+}
+
+// API Key 只能通过设置窗口写入本机偏好，必须保留安全输入并支持设置窗口内粘贴长 Key。
+function verifyAPIKeyPasteContract() {
+  const settingsWindowSource = readFileSync(
+    join(sourceRoot, "InputMethodSettingsWindow.swift"),
+    "utf8",
+  );
+  for (const requiredToken of [
+    "PasteableSecureTextField: NSSecureTextField",
+    'private let pasteAPIKeyButton = NSButton(title: "粘贴"',
+    "override func performKeyEquivalent(with event: NSEvent)",
+    "func paste(_ sender: Any?)",
+    "NSPasteboard.general.string(forType: .string)",
+    "fieldEditor.insertText(normalizedText, replacementRange:",
+    "apiKeyField.paste(nil)",
+  ]) {
+    if (!settingsWindowSource.includes(requiredToken)) {
+      throw new Error("设置页 API Key 必须保留安全输入并支持 Command-V/按钮粘贴：" + requiredToken);
     }
   }
 }
@@ -1012,6 +1213,24 @@ type BundledInfo = {
   tsInputMethodIconFileKey?: string;
   NSAccessibilityUsageDescription?: string;
 };
+
+function runWithEnvironment(
+  command: string,
+  args: string[],
+  environmentOverrides: Record<string, string>,
+) {
+  let resolvedArguments = args;
+  if (command === "swiftc") {
+    resolvedArguments = ["-module-cache-path", swiftModuleCacheRoot, ...args];
+  }
+  console.log(`$ ${command} ${resolvedArguments.join(" ")} [环境变量已注入]`);
+  const result = spawnSync(command, resolvedArguments, {
+    cwd: projectRoot,
+    stdio: "inherit",
+    env: { ...process.env, ...environmentOverrides },
+  });
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
 
 function run(command: string, args: string[]) {
   let resolvedArguments = args;

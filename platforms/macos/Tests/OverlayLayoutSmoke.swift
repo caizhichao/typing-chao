@@ -10,16 +10,19 @@ struct OverlayLayoutSmoke {
 
     static func main() {
         verifyAttributesAtZeroWins()
+        verifyFirstRectScreenSpaceWins()
+        verifyTinyFirstRectFallsBack()
+        verifyPaseoScreenCoordinates()
         verifyDocumentRangesDoNotAffectAnchor()
         verifyInvalidRectanglesAreRejected()
         verifyOffscreenRectangleIsRejected()
         verifyPanelClamping()
         verifyLongTranslationClearsAdjacentLine()
         verifyRecentAnchorReuse()
-        print("Overlay layout smoke test passed: attributes index 0, invalid anchor rejection, screen clamping, adjacent-line clearance, and recent anchor reuse")
+        print("Overlay layout smoke test passed: firstRect validation, screen-space attributes fallback, invalid anchor rejection, screen clamping, adjacent-line clearance, and recent anchor reuse")
     }
 
-    // 即使宿主返回非零 firstRect，浮层也只能采用 attributes index 0 的组合区矩形。
+    // firstRect 无效时仍回退到 attributes index 0 的组合区矩形。
     private static func verifyAttributesAtZeroWins() {
         let client = OverlayLayoutSmokeClient(
             selectedRangeValue: NSRange(location: 204, length: 0),
@@ -31,9 +34,69 @@ struct OverlayLayoutSmoke {
             fatalError("expected attributes anchor")
         }
         guard client.attributesIndexList == [0],
-              client.firstRectRangeList.isEmpty,
+              !client.firstRectRangeList.isEmpty,
               anchor.caretRect.origin == NSPoint(x: 420, y: 360) else {
-            fatalError("overlay anchor must use attributes index 0 and never query firstRect")
+            fatalError("overlay anchor must fall back to attributes index 0 when firstRect is invalid")
+        }
+    }
+
+    // Paseo 等宿主可能把 attributes 矩形留在窗口内，但 firstRect 仍提供正确屏幕坐标。
+    private static func verifyFirstRectScreenSpaceWins() {
+        let client = OverlayLayoutSmokeClient(
+            selectedRangeValue: NSRange(location: 204, length: 0),
+            attributesRect: NSRect(x: 32, y: 40, width: 1, height: 22),
+            firstRectValue: NSRect(x: 620, y: 420, width: 1, height: 22)
+        )
+        guard let anchor = InputOverlayAnchor(
+            client: client,
+            screenList: screenList
+        ) else {
+            fatalError("expected firstRect screen anchor")
+        }
+        guard anchor.caretRect.origin == NSPoint(x: 620, y: 420) else {
+            fatalError("screen-space firstRect must win over a window-local attributes rectangle")
+        }
+    }
+
+    // Paseo 可能返回极小的非零垃圾矩形，必须回退到屏幕坐标 attributes 矩形。
+    private static func verifyTinyFirstRectFallsBack() {
+        let tinyValue = CGFloat.leastNonzeroMagnitude
+        let client = OverlayLayoutSmokeClient(
+            attributesRect: NSRect(x: 747, y: 188, width: 1, height: 19),
+            firstRectValue: NSRect(x: tinyValue, y: 0, width: tinyValue, height: tinyValue),
+            bundleIdentifierValue: "sh.paseo.desktop"
+        )
+        guard let anchor = InputOverlayAnchor(
+            client: client,
+            screenList: [(
+                frame: NSRect(x: 0, y: 0, width: 1920, height: 1080),
+                visibleFrame: NSRect(x: 0, y: 90, width: 1920, height: 960)
+            )]
+        ) else {
+            fatalError("expected attributes fallback after rejecting tiny firstRect")
+        }
+        guard anchor.caretRect.origin == NSPoint(x: 747, y: 188) else {
+            fatalError("tiny firstRect must fall back to screen-space attributes coordinates")
+        }
+    }
+
+    // Paseo 的 attributes 矩形按 IMK 屏幕坐标使用，不能因为它落在窗口尺寸内而再次翻转。
+    private static func verifyPaseoScreenCoordinates() {
+        let client = OverlayLayoutSmokeClient(
+            attributesRect: NSRect(x: 620, y: 188, width: 1, height: 22),
+            bundleIdentifierValue: "sh.paseo.desktop"
+        )
+        guard let anchor = InputOverlayAnchor(
+            client: client,
+            screenList: [(
+                frame: NSRect(x: 0, y: 0, width: 1920, height: 1080),
+                visibleFrame: NSRect(x: 0, y: 90, width: 1920, height: 960)
+            )]
+        ) else {
+            fatalError("expected Paseo screen-space anchor")
+        }
+        guard anchor.caretRect.origin == NSPoint(x: 620, y: 188) else {
+            fatalError("Paseo attributes coordinates must not be flipped")
         }
     }
 
@@ -69,8 +132,8 @@ struct OverlayLayoutSmoke {
             guard InputOverlayAnchor(client: client, screenList: screenList) == nil else {
                 fatalError("invalid attributes rectangle must be rejected: \(invalidRect)")
             }
-            guard client.attributesIndexList == [0], client.firstRectRangeList.isEmpty else {
-                fatalError("invalid attributes rectangle must not trigger firstRect fallback")
+            guard client.attributesIndexList == [0] else {
+                fatalError("invalid attributes rectangle must still query attributes index 0")
             }
         }
     }
@@ -79,13 +142,13 @@ struct OverlayLayoutSmoke {
     private static func verifyOffscreenRectangleIsRejected() {
         let client = OverlayLayoutSmokeClient(
             attributesRect: NSRect(x: 5000, y: 5000, width: 1, height: 20),
-            firstRectValue: NSRect(x: 300, y: 300, width: 1, height: 20)
+            firstRectValue: NSRect(x: 5000, y: 5000, width: 1, height: 20)
         )
         guard InputOverlayAnchor(client: client, screenList: screenList) == nil else {
             fatalError("offscreen attributes rectangle must not fall back to a main screen")
         }
-        guard client.firstRectRangeList.isEmpty else {
-            fatalError("offscreen attributes rectangle must not query firstRect")
+        guard !client.firstRectRangeList.isEmpty else {
+            fatalError("offscreen attributes rectangle must check the screen-space fallback")
         }
     }
 
@@ -181,12 +244,13 @@ struct OverlayLayoutSmoke {
     }
 }
 
-// 用完整 IMKTextInput 替身隔离系统宿主，验证定位只读取 attributes index 0。
+// 用完整 IMKTextInput 替身隔离系统宿主，验证屏幕坐标优先和 attributes 回退。
 private final class OverlayLayoutSmokeClient: NSObject, IMKTextInput {
     private let selectedRangeValue: NSRange
     private let markedRangeValue: NSRange
     private let attributesRect: NSRect
     private let firstRectValue: NSRect
+    private let bundleIdentifierValue: String
     private(set) var attributesIndexList: [Int] = []
     private(set) var firstRectRangeList: [NSRange] = []
 
@@ -194,12 +258,14 @@ private final class OverlayLayoutSmokeClient: NSObject, IMKTextInput {
         selectedRangeValue: NSRange = NSRange(location: 0, length: 0),
         markedRangeValue: NSRange = NSRange(location: NSNotFound, length: 0),
         attributesRect: NSRect,
-        firstRectValue: NSRect = .zero
+        firstRectValue: NSRect = .zero,
+        bundleIdentifierValue: String = "com.caizhichao.typingchao.overlay-smoke"
     ) {
         self.selectedRangeValue = selectedRangeValue
         self.markedRangeValue = markedRangeValue
         self.attributesRect = attributesRect
         self.firstRectValue = firstRectValue
+        self.bundleIdentifierValue = bundleIdentifierValue
     }
 
     func insertText(_ string: Any, replacementRange: NSRange) {}
@@ -239,7 +305,7 @@ private final class OverlayLayoutSmokeClient: NSObject, IMKTextInput {
 
     func supportsUnicode() -> Bool { true }
 
-    func bundleIdentifier() -> String { "com.caizhichao.typingchao.overlay-smoke" }
+    func bundleIdentifier() -> String { bundleIdentifierValue }
 
     func windowLevel() -> CGWindowLevel { 0 }
 

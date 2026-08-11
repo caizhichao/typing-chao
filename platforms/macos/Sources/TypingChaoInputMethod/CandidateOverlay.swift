@@ -17,14 +17,15 @@ final class CandidateOverlay {
         contentView.autoresizingMask = [.width, .height]
 
         visualEffectView = NSVisualEffectView(frame: initialFrame)
-        visualEffectView.material = .hudWindow
-        visualEffectView.blendingMode = .behindWindow
+        visualEffectView.material = .popover
+        visualEffectView.blendingMode = .withinWindow
         visualEffectView.state = .active
         visualEffectView.wantsLayer = true
         visualEffectView.layer?.cornerRadius = CandidateBarStyle.cornerRadius
         visualEffectView.layer?.masksToBounds = true
         visualEffectView.layer?.borderWidth = 1
         visualEffectView.layer?.borderColor = CandidateBarStyle.borderColor.cgColor
+        visualEffectView.layer?.backgroundColor = CandidateBarStyle.panelBackgroundColor.cgColor
         visualEffectView.addSubview(contentView)
 
         panel = NSPanel(
@@ -104,14 +105,17 @@ final class CandidateOverlay {
 }
 
 private enum CandidateBarStyle {
-    static let compactPanelHeight: CGFloat = 40
-    static let commentPanelHeight: CGFloat = 48
+    static let compactPanelHeight: CGFloat = 36
+    static let commentPanelHeight: CGFloat = 44
     static let maximumPanelWidth: CGFloat = 680
     static let minimumCandidateWidth: CGFloat = 44
-    static let cornerRadius: CGFloat = 8
-    static let selectedColor = NSColor(calibratedRed: 0.03, green: 0.68, blue: 0.59, alpha: 0.92)
-    static let hoverColor = NSColor(calibratedWhite: 1, alpha: 0.08)
-    static let borderColor = NSColor(calibratedWhite: 1, alpha: 0.16)
+    static let cornerRadius: CGFloat = 9
+    static let panelBackgroundColor = NSColor(calibratedWhite: 1, alpha: 0.96)
+    static let selectedColor = NSColor(calibratedRed: 0.03, green: 0.68, blue: 0.59, alpha: 1)
+    static let hoverColor = NSColor(calibratedWhite: 0, alpha: 0.06)
+    static let borderColor = NSColor(calibratedWhite: 0, alpha: 0.16)
+    static let primaryTextColor = NSColor(calibratedWhite: 0.14, alpha: 0.94)
+    static let secondaryTextColor = NSColor(calibratedWhite: 0.40, alpha: 0.82)
 }
 
 // 候选尾部分开分页与 AI/设置操作组，并为页码、间距和分隔线保留真实宽度。
@@ -399,14 +403,14 @@ private final class CandidateBarView: NSView {
             return
         }
 
-        var labelColor = NSColor(calibratedWhite: 1, alpha: 0.42)
-        var textColor = NSColor(calibratedWhite: 1, alpha: 0.84)
-        var commentColor = NSColor(calibratedWhite: 1, alpha: 0.38)
+        var labelColor = CandidateBarStyle.secondaryTextColor
+        var textColor = CandidateBarStyle.primaryTextColor
+        var commentColor = CandidateBarStyle.secondaryTextColor
         var textWeight = NSFont.Weight.regular
         if isHighlighted {
             labelColor = NSColor(calibratedWhite: 1, alpha: 0.86)
             textColor = .white
-            commentColor = NSColor(calibratedWhite: 1, alpha: 0.64)
+            commentColor = NSColor(calibratedWhite: 1, alpha: 0.78)
             textWeight = .semibold
         }
 
@@ -415,22 +419,22 @@ private final class CandidateBarView: NSView {
             .foregroundColor: labelColor,
         ]
         let textAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 15, weight: textWeight),
+            .font: NSFont.systemFont(ofSize: 14.5, weight: textWeight),
             .foregroundColor: textColor,
         ]
         let commentAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 9.5, weight: .regular),
+            .font: NSFont.systemFont(ofSize: 9, weight: .regular),
             .foregroundColor: commentColor,
         ]
         if candidateItem.commentText.isEmpty {
             NSString(string: candidateItem.labelText).draw(
-                at: NSPoint(x: candidateRect.minX + 8, y: 14),
+                at: NSPoint(x: candidateRect.minX + 8, y: (candidateRect.height - 13) / 2),
                 withAttributes: labelAttributes
             )
             NSString(string: candidateItem.textValue).draw(
                 with: NSRect(
                     x: candidateRect.minX + 24,
-                    y: 10,
+                    y: (candidateRect.height - 20) / 2,
                     width: candidateRect.width - 31,
                     height: 20
                 ),
@@ -441,7 +445,7 @@ private final class CandidateBarView: NSView {
         }
 
         NSString(string: candidateItem.labelText).draw(
-            at: NSPoint(x: candidateRect.minX + 8, y: 16),
+            at: NSPoint(x: candidateRect.minX + 8, y: 15),
             withAttributes: labelAttributes
         )
         NSString(string: candidateItem.textValue).draw(
@@ -468,9 +472,9 @@ private final class CandidateBarView: NSView {
 
     // 首位 AI 候选同时显示数字标签和星标图形，明确提示可按 1 确认。
     private func drawAIInputTriggerCandidate(candidateRect: NSRect, isHighlighted: Bool) {
-        var iconColor = NSColor(calibratedRed: 0.38, green: 0.94, blue: 0.82, alpha: 0.92)
-        var labelColor = NSColor(calibratedWhite: 1, alpha: 0.42)
-        var textColor = NSColor(calibratedWhite: 1, alpha: 0.86)
+        var iconColor = CandidateBarStyle.selectedColor
+        var labelColor = CandidateBarStyle.secondaryTextColor
+        var textColor = CandidateBarStyle.primaryTextColor
         if isHighlighted {
             iconColor = .white
             labelColor = NSColor(calibratedWhite: 1, alpha: 0.86)
@@ -505,7 +509,7 @@ private final class CandidateBarView: NSView {
         pageParagraphStyle.alignment = .center
         let pageAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .medium),
-            .foregroundColor: NSColor(calibratedWhite: 1, alpha: 0.46),
+            .foregroundColor: CandidateBarStyle.secondaryTextColor,
             .paragraphStyle: pageParagraphStyle,
         ]
         NSString(string: String(snapshot.pageNumber + 1)).draw(
@@ -533,7 +537,7 @@ private final class CandidateBarView: NSView {
         }
         let chevronAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 16, weight: .medium),
-            .foregroundColor: NSColor(calibratedWhite: 1, alpha: chevronAlpha),
+            .foregroundColor: NSColor(calibratedWhite: 0.30, alpha: chevronAlpha),
         ]
         var chevronText = "›"
         if backward {
@@ -547,7 +551,7 @@ private final class CandidateBarView: NSView {
 
     private func drawTrailingSeparator() {
         guard !separatorRect.isEmpty else { return }
-        NSColor(calibratedWhite: 1, alpha: 0.14).setFill()
+        NSColor(calibratedWhite: 0, alpha: 0.12).setFill()
         NSBezierPath(rect: separatorRect).fill()
     }
 
@@ -689,7 +693,7 @@ private final class CandidateAIInputButton: NSButton {
         title = "AI"
         font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         isBordered = false
-        contentTintColor = NSColor(calibratedWhite: 1, alpha: 0.82)
+        contentTintColor = CandidateBarStyle.secondaryTextColor
         toolTip = "打开 AI 输入"
         setAccessibilityLabel("打开 AI 输入")
         wantsLayer = true
@@ -721,12 +725,12 @@ private final class CandidateAIInputButton: NSButton {
 
     override func mouseEntered(with event: NSEvent) {
         layer?.backgroundColor = CandidateBarStyle.hoverColor.cgColor
-        contentTintColor = .white
+        contentTintColor = CandidateBarStyle.primaryTextColor
     }
 
     override func mouseExited(with event: NSEvent) {
         layer?.backgroundColor = NSColor.clear.cgColor
-        contentTintColor = NSColor(calibratedWhite: 1, alpha: 0.82)
+        contentTintColor = CandidateBarStyle.secondaryTextColor
     }
 }
 
@@ -745,7 +749,7 @@ private final class CandidateSettingsButton: NSButton {
         )?.withSymbolConfiguration(
             NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
         )
-        contentTintColor = NSColor(calibratedWhite: 1, alpha: 0.76)
+        contentTintColor = CandidateBarStyle.secondaryTextColor
         toolTip = "打开设置"
         wantsLayer = true
         layer?.cornerRadius = 6
@@ -776,12 +780,12 @@ private final class CandidateSettingsButton: NSButton {
 
     override func mouseEntered(with event: NSEvent) {
         layer?.backgroundColor = CandidateBarStyle.hoverColor.cgColor
-        contentTintColor = .white
+        contentTintColor = CandidateBarStyle.primaryTextColor
     }
 
     override func mouseExited(with event: NSEvent) {
         layer?.backgroundColor = NSColor.clear.cgColor
-        contentTintColor = NSColor(calibratedWhite: 1, alpha: 0.76)
+        contentTintColor = CandidateBarStyle.secondaryTextColor
     }
 
     override func resetCursorRects() {

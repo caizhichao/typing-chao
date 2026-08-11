@@ -39,8 +39,11 @@ final class InputMethodSettingsWindowController: NSWindowController {
             }
             InputMethodSettings.shared.setTargetLanguage(targetLanguage)
         }
-        settingsViewController.deepSeekAPIKeyHandler = { apiKey in
-            InputMethodSettings.shared.setDeepSeekAPIKey(apiKey)
+        settingsViewController.aiServiceProviderHandler = { serviceProvider in
+            InputMethodSettings.shared.setAIServiceProvider(serviceProvider)
+        }
+        settingsViewController.apiKeyHandler = { apiKey in
+            InputMethodSettings.shared.setCurrentAPIKey(apiKey)
         }
         settingsViewController.rimeOptionHandler = { [weak self] optionStateList in
             if let inputController = self?.inputController {
@@ -93,7 +96,8 @@ private enum InputMethodSettingsStyle {
 private final class InputMethodSettingsViewController: NSViewController {
     var translationEnabledHandler: ((Bool) -> Void)?
     var targetLanguageHandler: ((TranslationTargetLanguage) -> Void)?
-    var deepSeekAPIKeyHandler: ((String) -> Bool)?
+    var aiServiceProviderHandler: ((AIServiceProvider) -> Void)?
+    var apiKeyHandler: ((String) -> Bool)?
     var rimeOptionHandler: (([RimeOptionState]) -> Void)?
     // 设置页的方案选择必须回到当前 librime 会话，不能只改变界面选中项。
     var schemaHandler: ((String) -> Void)?
@@ -103,9 +107,11 @@ private final class InputMethodSettingsViewController: NSViewController {
     private let translationPage = NSView()
     private let inputPage = NSView()
     private let translationSwitch = NSSwitch()
-    private let deepSeekAPIKeyField = NSSecureTextField(frame: .zero)
-    private let saveDeepSeekAPIKeyButton = NSButton(title: "保存", target: nil, action: nil)
-    private let clearDeepSeekAPIKeyButton = NSButton(title: "清除", target: nil, action: nil)
+    private let apiKeyField = PasteableSecureTextField(frame: .zero)
+    private let pasteAPIKeyButton = NSButton(title: "粘贴", target: nil, action: nil)
+    private let saveAPIKeyButton = NSButton(title: "保存", target: nil, action: nil)
+    private let clearAPIKeyButton = NSButton(title: "清除", target: nil, action: nil)
+    private let aiServiceProviderPopUpButton = NSPopUpButton(frame: .zero, pullsDown: false)
     private let targetLanguagePopUpButton = NSPopUpButton(frame: .zero, pullsDown: false)
     private let schemaPopUpButton = NSPopUpButton(frame: .zero, pullsDown: false)
     private let inputModeControl = NSSegmentedControl(labels: ["中文", "英文"], trackingMode: .selectOne, target: nil, action: nil)
@@ -130,10 +136,8 @@ private final class InputMethodSettingsViewController: NSViewController {
             translationSwitch.state = .on
         }
         selectTargetLanguage(InputMethodSettings.shared.targetLanguage)
-        deepSeekAPIKeyField.stringValue = ""
-        deepSeekAPIKeyField.placeholderString = InputMethodSettings.shared.deepSeekAPIKey == nil
-            ? "输入 DeepSeek API Key"
-            : "已配置，输入新 Key 可覆盖"
+        selectAIServiceProvider(InputMethodSettings.shared.aiServiceProvider)
+        updateAPIKeyField()
         inputModeControl.selectedSegment = 0
         if snapshot.isAsciiMode {
             inputModeControl.selectedSegment = 1
@@ -237,20 +241,30 @@ private final class InputMethodSettingsViewController: NSViewController {
         targetLanguagePopUpButton.target = self
         targetLanguagePopUpButton.action = #selector(changeTargetLanguage(_:))
         targetLanguagePopUpButton.widthAnchor.constraint(equalToConstant: 128).isActive = true
-        deepSeekAPIKeyField.widthAnchor.constraint(equalToConstant: 188).isActive = true
-        deepSeekAPIKeyField.placeholderString = "输入 DeepSeek API Key"
-        saveDeepSeekAPIKeyButton.target = self
-        saveDeepSeekAPIKeyButton.action = #selector(saveDeepSeekAPIKey)
-        clearDeepSeekAPIKeyButton.target = self
-        clearDeepSeekAPIKeyButton.action = #selector(clearDeepSeekAPIKey)
-        let deepSeekAPIKeyControl = NSStackView(views: [
-            deepSeekAPIKeyField,
-            saveDeepSeekAPIKeyButton,
-            clearDeepSeekAPIKeyButton,
+        for serviceProvider in AIServiceProvider.allCases {
+            let menuItem = NSMenuItem(title: serviceProvider.displayName, action: nil, keyEquivalent: "")
+            menuItem.representedObject = serviceProvider.rawValue
+            aiServiceProviderPopUpButton.menu?.addItem(menuItem)
+        }
+        aiServiceProviderPopUpButton.target = self
+        aiServiceProviderPopUpButton.action = #selector(changeAIServiceProvider(_:))
+        aiServiceProviderPopUpButton.widthAnchor.constraint(equalToConstant: 152).isActive = true
+        apiKeyField.widthAnchor.constraint(equalToConstant: 188).isActive = true
+        pasteAPIKeyButton.target = self
+        pasteAPIKeyButton.action = #selector(pasteAPIKey)
+        saveAPIKeyButton.target = self
+        saveAPIKeyButton.action = #selector(saveAPIKey)
+        clearAPIKeyButton.target = self
+        clearAPIKeyButton.action = #selector(clearAPIKey)
+        let apiKeyControl = NSStackView(views: [
+            apiKeyField,
+            pasteAPIKeyButton,
+            saveAPIKeyButton,
+            clearAPIKeyButton,
         ])
-        deepSeekAPIKeyControl.orientation = .horizontal
-        deepSeekAPIKeyControl.spacing = 6
-        deepSeekAPIKeyControl.translatesAutoresizingMaskIntoConstraints = false
+        apiKeyControl.orientation = .horizontal
+        apiKeyControl.spacing = 6
+        apiKeyControl.translatesAutoresizingMaskIntoConstraints = false
 
         let translationCard = makeCard(rows: [
             makeRow(
@@ -264,9 +278,14 @@ private final class InputMethodSettingsViewController: NSViewController {
                 trailingControl: targetLanguagePopUpButton
             ),
             makeRow(
-                title: "DeepSeek Key",
+                title: "AI 服务",
+                subtitle: "翻译和 AI 输入共用此请求协议",
+                trailingControl: aiServiceProviderPopUpButton
+            ),
+            makeRow(
+                title: "API Key",
                 subtitle: "只缓存在本机设置，不会写入输入法包",
-                trailingControl: deepSeekAPIKeyControl
+                trailingControl: apiKeyControl
             ),
             makeRow(
                 title: "AI 快速输入",
@@ -446,23 +465,45 @@ private final class InputMethodSettingsViewController: NSViewController {
         }
     }
 
-    @objc private func saveDeepSeekAPIKey() {
-        guard let deepSeekAPIKeyHandler,
-              deepSeekAPIKeyHandler(deepSeekAPIKeyField.stringValue) else {
-            NSSound.beep()
+    private func selectAIServiceProvider(_ serviceProvider: AIServiceProvider) {
+        for menuItem in aiServiceProviderPopUpButton.itemArray {
+            guard menuItem.representedObject as? String == serviceProvider.rawValue else {
+                continue
+            }
+            aiServiceProviderPopUpButton.select(menuItem)
             return
         }
-        deepSeekAPIKeyField.stringValue = ""
-        deepSeekAPIKeyField.placeholderString = "已配置，输入新 Key 可覆盖"
     }
 
-    @objc private func clearDeepSeekAPIKey() {
-        guard deepSeekAPIKeyHandler?("") == true else {
+    private func updateAPIKeyField() {
+        let serviceProvider = InputMethodSettings.shared.aiServiceProvider
+        apiKeyField.stringValue = ""
+        apiKeyField.placeholderString = InputMethodSettings.shared.apiKey(for: serviceProvider) == nil
+            ? "输入 \(serviceProvider.apiKeyDisplayName)"
+            : "已配置，输入新 Key 可覆盖"
+    }
+
+    @objc private func pasteAPIKey() {
+        apiKeyField.paste(nil)
+        apiKeyField.window?.makeFirstResponder(apiKeyField)
+    }
+
+    @objc private func saveAPIKey() {
+        guard let apiKeyHandler,
+              apiKeyHandler(apiKeyField.stringValue) else {
             NSSound.beep()
             return
         }
-        deepSeekAPIKeyField.stringValue = ""
-        deepSeekAPIKeyField.placeholderString = "输入 DeepSeek API Key"
+        apiKeyField.stringValue = ""
+        apiKeyField.placeholderString = "已配置，输入新 Key 可覆盖"
+    }
+
+    @objc private func clearAPIKey() {
+        guard apiKeyHandler?("") == true else {
+            NSSound.beep()
+            return
+        }
+        updateAPIKeyField()
     }
 
     // 方案列表只使用当前 librime 已部署结果，避免设置页展示无法切换的静态选项。
@@ -503,6 +544,15 @@ private final class InputMethodSettingsViewController: NSViewController {
         targetLanguageHandler?(targetLanguage)
     }
 
+    @objc private func changeAIServiceProvider(_ sender: NSPopUpButton) {
+        guard let rawValue = sender.selectedItem?.representedObject as? String,
+              let serviceProvider = AIServiceProvider(rawValue: rawValue) else {
+            return
+        }
+        aiServiceProviderHandler?(serviceProvider)
+        updateAPIKeyField()
+    }
+
     @objc private func changeSchema(_ sender: NSPopUpButton) {
         guard let schemaIdentifier = sender.selectedItem?.representedObject as? String else {
             return
@@ -536,6 +586,34 @@ private final class InputMethodSettingsViewController: NSViewController {
         rimeOptionHandler?([
             RimeOptionState(optionName: .fullShape, isEnabled: sender.selectedSegment == 1),
         ])
+    }
+}
+
+// API Key 仍使用安全输入框，但允许设置窗口内的 Command-V 和显式粘贴按钮写入当前编辑位置。
+private final class PasteableSecureTextField: NSSecureTextField {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifierFlags == [.command], event.charactersIgnoringModifiers?.lowercased() == "v" {
+            paste(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    func paste(_ sender: Any?) {
+        guard let pastedText = NSPasteboard.general.string(forType: .string) else {
+            NSSound.beep()
+            return
+        }
+        let normalizedText = pastedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedText.isEmpty else {
+            return
+        }
+        if let fieldEditor = currentEditor() as? NSTextView {
+            fieldEditor.insertText(normalizedText, replacementRange: fieldEditor.selectedRange())
+            return
+        }
+        stringValue = normalizedText
     }
 }
 

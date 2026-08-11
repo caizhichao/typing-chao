@@ -1,52 +1,25 @@
-// 等号命令入口先作为 marked text 正常展示，候选确认前不直接打开 AI 面板。
-enum AIInputCommandAction: Equatable {
-    case passThrough
-    case updateMarkedText(String)
-    case commitMarkedText(String)
-}
-
-// 负责识别单个等号命令入口；后续数字候选可在输入控制器中按序扩展。
+// 单个等号只负责显示 AI 候选，不再把后续字符拼成命令前缀。
 struct AIInputCommandState {
     static let triggerText = "="
 
-    private(set) var pendingText = ""
-
-    var isPending: Bool {
-        !pendingText.isEmpty
-    }
+    private(set) var isPending = false
 
     var isTriggerReady: Bool {
-        pendingText == Self.triggerText
+        isPending
     }
 
-    mutating func consume(keyName: String, isPlainKey: Bool) -> AIInputCommandAction {
-        if pendingText.isEmpty {
-            guard isPlainKey, keyName == Self.triggerText else {
-                return .passThrough
-            }
-            pendingText = Self.triggerText
-            return .updateMarkedText(pendingText)
+    // 只有独立的普通等号才能进入 AI 候选状态，重复触发或其它字符都直接交回原输入链路。
+    mutating func activateTrigger(keyName: String, isPlainKey: Bool) -> Bool {
+        guard !isPending,
+              isPlainKey,
+              keyName == Self.triggerText else {
+            return false
         }
-
-        return .commitMarkedText(flushPendingText())
-    }
-
-    // 退格只移除当前可见的等号 marked text，不向 librime 回放虚构按键。
-    mutating func deleteBackward() -> String {
-        guard !pendingText.isEmpty else {
-            return ""
-        }
-        pendingText.removeLast()
-        return pendingText
-    }
-
-    mutating func flushPendingText() -> String {
-        let textValue = pendingText
-        pendingText = ""
-        return textValue
+        isPending = true
+        return true
     }
 
     mutating func reset() {
-        pendingText = ""
+        isPending = false
     }
 }

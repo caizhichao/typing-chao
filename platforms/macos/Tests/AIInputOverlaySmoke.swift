@@ -9,9 +9,13 @@ struct AIInputOverlaySmoke {
             backing: .buffered,
             defer: false
         )
-        guard !panel.canBecomeKey, !panel.canBecomeMain else {
-            fatalError("AI input panel must preserve the host IMK session instead of accepting text focus")
+        guard panel.canBecomeKey, !panel.canBecomeMain else {
+            fatalError("AI input panel must accept the AI prompt focus without becoming the main window")
         }
-        print("AI input overlay smoke test passed: host-session panel lifecycle")
+        let promptView = AIInputPromptView(frame: NSRect(x: 0, y: 0, width: 160, height: 40))
+        guard promptView.acceptsFirstResponder else {
+            fatalError("AI prompt view must accept first responder focus")
+        }
+        print("AI input overlay smoke test passed: key panel and prompt first responder")
     }
 }

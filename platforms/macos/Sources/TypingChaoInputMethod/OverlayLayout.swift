@@ -15,7 +15,7 @@ struct InputOverlayAnchor {
         max(visibleFrame.width - Self.edgeInset * 2, 1)
     }
 
-    // 成熟 InputMethodKit 前端以 index 0 查询当前组合区行高，禁止混用文档范围和 firstRect。
+    // 先用 IMK 的 firstRect 屏幕坐标定位，宿主异常时才回退到组合区行高矩形。
     init?(client: IMKTextInput?) {
         let screenList = NSScreen.screens.map { screen in
             (frame: screen.frame, visibleFrame: screen.visibleFrame)
@@ -30,9 +30,16 @@ struct InputOverlayAnchor {
     ) {
         guard let client else { return nil }
 
-        var resolvedRect = NSRect.zero
-        _ = client.attributes(forCharacterIndex: 0, lineHeightRectangle: &resolvedRect)
-        guard Self.isUsable(resolvedRect) else { return nil }
+        var attributesRect = NSRect.zero
+        _ = client.attributes(forCharacterIndex: 0, lineHeightRectangle: &attributesRect)
+        let resolvedRect = Self.resolvedScreenRect(
+            client: client,
+            attributesRect: attributesRect,
+            screenList: screenList
+        )
+        guard var resolvedRect else {
+            return nil
+        }
 
         if resolvedRect.width < 1 {
             resolvedRect.size.width = 1
@@ -96,15 +103,85 @@ struct InputOverlayAnchor {
         return NSPoint(x: originX, y: originY)
     }
 
-    // 仅接受有限且非负尺寸的真实行高矩形；屏幕归属由初始化阶段继续验证。
+    private static func resolvedScreenRect(
+        client: IMKTextInput,
+        attributesRect: NSRect,
+        screenList: [(frame: NSRect, visibleFrame: NSRect)]
+    ) -> NSRect? {
+        if let firstRect = firstScreenRect(
+            client: client,
+            screenList: screenList
+        ) {
+            return firstRect
+        }
+        return screenRect(
+            for: attributesRect,
+            screenList: screenList
+        )
+    }
+
+    private static func firstScreenRect(
+        client: IMKTextInput,
+        screenList: [(frame: NSRect, visibleFrame: NSRect)]
+    ) -> NSRect? {
+        var rangeList: [NSRange] = []
+        for range in [client.selectedRange(), client.markedRange()] {
+            guard range.location != NSNotFound,
+                  range.location >= 0,
+                  range.length >= 0,
+                  !rangeList.contains(range) else {
+                continue
+            }
+            rangeList.append(range)
+        }
+        for range in rangeList {
+            var actualRange = NSRange(location: NSNotFound, length: 0)
+            let firstRect = client.firstRect(
+                forCharacterRange: range,
+                actualRange: &actualRange
+            )
+            if let resolvedRect = screenRect(
+                for: firstRect,
+                screenList: screenList
+            ) {
+                return resolvedRect
+            }
+        }
+        return nil
+    }
+
+    private static func screenRect(
+        for rect: NSRect,
+        screenList: [(frame: NSRect, visibleFrame: NSRect)]
+    ) -> NSRect? {
+        guard isUsable(rect) else { return nil }
+        guard belongsToScreen(rect, screenList: screenList) else { return nil }
+        return rect
+    }
+
+    private static func belongsToScreen(
+        _ rect: NSRect,
+        screenList: [(frame: NSRect, visibleFrame: NSRect)]
+    ) -> Bool {
+        screenList.contains { $0.frame.intersects(rect) }
+    }
+
+    // 仅接受有限且有实际几何量的行高矩形，拒绝宿主返回的非零浮点垃圾值。
     private static func isUsable(_ rect: NSRect) -> Bool {
-        rect.origin.x.isFinite
+        let geometryMagnitude = max(
+            abs(rect.origin.x),
+            abs(rect.origin.y),
+            abs(rect.size.width),
+            abs(rect.size.height)
+        )
+        return rect.origin.x.isFinite
             && rect.origin.y.isFinite
             && rect.size.width.isFinite
             && rect.size.height.isFinite
             && rect.size.width >= 0
             && rect.size.height >= 0
             && rect != .zero
+            && geometryMagnitude >= 0.5
             && rect.origin.x != CGFloat.greatestFiniteMagnitude
             && rect.origin.y != CGFloat.greatestFiniteMagnitude
     }

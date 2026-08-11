@@ -59,6 +59,30 @@ enum TranslationTargetLanguage: String, CaseIterable {
     }
 }
 
+// 统一选择翻译和 AI 输入共用的请求协议，避免两条功能链各自保存服务状态。
+enum AIServiceProvider: String, CaseIterable {
+    case deepSeek = "deepseek"
+    case codexResponses = "codex-responses"
+
+    var displayName: String {
+        switch self {
+        case .deepSeek:
+            return "DeepSeek"
+        case .codexResponses:
+            return "Codex Responses"
+        }
+    }
+
+    var apiKeyDisplayName: String {
+        switch self {
+        case .deepSeek:
+            return "DeepSeek Key"
+        case .codexResponses:
+            return "Codex API Key"
+        }
+    }
+}
+
 // 集中保存本输入法的用户级偏好，不写入其它 Rime 前端或系统输入源配置。
 final class InputMethodSettings {
     static let shared = InputMethodSettings()
@@ -68,6 +92,8 @@ final class InputMethodSettings {
         static let targetLanguage = "TypingChaoTargetLanguage"
         static let selectedSchema = "TypingChaoSelectedRimeSchema"
         static let deepSeekAPIKey = "TypingChaoDeepSeekAPIKey"
+        static let codexAPIKey = "TypingChaoCodexAPIKey"
+        static let aiServiceProvider = "TypingChaoAIServiceProvider"
 
         static let rimeOptionPrefix = "TypingChaoRimeOption."
 
@@ -98,6 +124,14 @@ final class InputMethodSettings {
         return targetLanguage
     }
 
+    var aiServiceProvider: AIServiceProvider {
+        guard let storedProvider = userDefaults.string(forKey: SettingKey.aiServiceProvider),
+              let serviceProvider = AIServiceProvider(rawValue: storedProvider) else {
+            return .deepSeek
+        }
+        return serviceProvider
+    }
+
 
     var selectedSchemaIdentifier: String? {
         let schemaIdentifier = userDefaults.string(forKey: SettingKey.selectedSchema)
@@ -108,7 +142,26 @@ final class InputMethodSettings {
     }
 
     var deepSeekAPIKey: String? {
-        let apiKey = userDefaults.string(forKey: SettingKey.deepSeekAPIKey)?
+        apiKey(for: .deepSeek)
+    }
+
+    var codexAPIKey: String? {
+        apiKey(for: .codexResponses)
+    }
+
+    var currentAPIKey: String? {
+        apiKey(for: aiServiceProvider)
+    }
+
+    func apiKey(for serviceProvider: AIServiceProvider) -> String? {
+        let apiKeySettingKey: String
+        switch serviceProvider {
+        case .deepSeek:
+            apiKeySettingKey = SettingKey.deepSeekAPIKey
+        case .codexResponses:
+            apiKeySettingKey = SettingKey.codexAPIKey
+        }
+        let apiKey = userDefaults.string(forKey: apiKeySettingKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard let apiKey, !apiKey.isEmpty else { return nil }
         return apiKey
@@ -140,6 +193,10 @@ final class InputMethodSettings {
         userDefaults.set(targetLanguage.rawValue, forKey: SettingKey.targetLanguage)
     }
 
+    func setAIServiceProvider(_ serviceProvider: AIServiceProvider) {
+        userDefaults.set(serviceProvider.rawValue, forKey: SettingKey.aiServiceProvider)
+    }
+
 
     func setSelectedSchemaIdentifier(_ schemaIdentifier: String) {
         userDefaults.set(schemaIdentifier, forKey: SettingKey.selectedSchema)
@@ -148,11 +205,29 @@ final class InputMethodSettings {
     // DeepSeek 凭据由设置页写入当前用户偏好缓存，构建包和测试产物不包含用户输入。
     @discardableResult
     func setDeepSeekAPIKey(_ apiKey: String) -> Bool {
+        setAPIKey(apiKey, for: .deepSeek)
+    }
+
+    // 当前选择的服务 Key 由设置页写入本机用户偏好，不进入 Keychain、输入法包或构建产物。
+    @discardableResult
+    func setCurrentAPIKey(_ apiKey: String) -> Bool {
+        setAPIKey(apiKey, for: aiServiceProvider)
+    }
+
+    @discardableResult
+    func setAPIKey(_ apiKey: String, for serviceProvider: AIServiceProvider) -> Bool {
         let normalizedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiKeySettingKey: String
+        switch serviceProvider {
+        case .deepSeek:
+            apiKeySettingKey = SettingKey.deepSeekAPIKey
+        case .codexResponses:
+            apiKeySettingKey = SettingKey.codexAPIKey
+        }
         if normalizedAPIKey.isEmpty {
-            userDefaults.removeObject(forKey: SettingKey.deepSeekAPIKey)
+            userDefaults.removeObject(forKey: apiKeySettingKey)
         } else {
-            userDefaults.set(normalizedAPIKey, forKey: SettingKey.deepSeekAPIKey)
+            userDefaults.set(normalizedAPIKey, forKey: apiKeySettingKey)
         }
         return true
     }

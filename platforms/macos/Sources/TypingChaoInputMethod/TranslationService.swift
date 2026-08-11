@@ -1,9 +1,18 @@
 import Foundation
 
-// 统一本地直连 DeepSeek 的整段请求，AI 凭据只从当前用户设置缓存读取。
+// 描述当前 AI 面板会话中的已完成消息，客户端每次请求都显式携带本地会话上下文。
+struct AIConversationMessage {
+    let roleName: String
+    let contentText: String
+
+    init(roleName: String, contentText: String) {
+        self.roleName = roleName
+        self.contentText = contentText
+    }
+}
+
+// 统一执行翻译和 AI 输入请求，协议由设置页选择，凭据只从当前用户设置缓存读取。
 final class TranslationService {
-    private let endpointURL: URL
-    private let modelName: String
     private let sourceLanguageName: String
     private let inputMethodSettings: InputMethodSettings
     private let urlSession: URLSession
@@ -19,8 +28,6 @@ final class TranslationService {
 
     init(inputMethodSettings: InputMethodSettings = .shared) {
         self.inputMethodSettings = inputMethodSettings
-        endpointURL = TranslationConfiguration.endpointURL
-        modelName = TranslationConfiguration.modelName
         sourceLanguageName = TranslationConfiguration.sourceLanguageName
 
         let sessionConfiguration = URLSessionConfiguration.ephemeral
@@ -30,26 +37,14 @@ final class TranslationService {
         urlSession = URLSession(configuration: sessionConfiguration)
     }
 
-    // 通过 DeepSeek 官方接口提交整段文本，凭据只在请求发送时进入请求头。
+    // 提交完整源文本快照，避免实时翻译请求依赖之前的响应上下文。
     func translate(_ sourceText: String) async throws -> String {
         let normalizedSource = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedSource.isEmpty else { return "" }
-        let requestBody = ChatCompletionRequest(
-            modelName: modelName,
-            streamEnabled: false,
-            thinkingConfiguration: ThinkingConfiguration(typeName: "disabled"),
-            temperatureValue: 0,
-            maxTokenCount: TranslationConfiguration.maxOutputTokens,
-            messageList: [
-                ChatMessage(roleName: "system", contentText: systemPrompt()),
-                ChatMessage(
-                    roleName: "user",
-                    contentText: "<source_text>\n\(normalizedSource)\n</source_text>"
-                ),
-            ]
+        let rawContent = try await requestAIResponse(
+            systemPromptText: systemPrompt(),
+            inputText: "<source_text>\n\(normalizedSource)\n</source_text>"
         )
-
-        let rawContent = try await requestCompletion(requestBody: requestBody)
         let translatedText = Self.cleanTranslation(rawContent)
         guard !translatedText.isEmpty else {
             throw TranslationError.emptyResult
@@ -57,26 +52,24 @@ final class TranslationService {
         return translatedText
     }
 
-    // 单次 AI 输入沿用同一 DeepSeek 请求链，但不携带翻译历史或此前提示词。
-    func requestAIInput(promptText: String) async throws -> String {
+    // AI 输入沿用当前选择的请求协议，并把当前面板会话的历史消息重新发送给服务端。
+    func requestAIInput(
+        promptText: String,
+        conversationMessageList: [AIConversationMessage] = []
+    ) async throws -> String {
         let normalizedPrompt = promptText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedPrompt.isEmpty else { return "" }
-        let requestBody = ChatCompletionRequest(
-            modelName: modelName,
-            streamEnabled: false,
-            thinkingConfiguration: ThinkingConfiguration(typeName: "disabled"),
-            temperatureValue: 0,
-            maxTokenCount: TranslationConfiguration.maxOutputTokens,
-            messageList: [
-                ChatMessage(roleName: "system", contentText: aiInputSystemPrompt()),
-                ChatMessage(
-                    roleName: "user",
-                    contentText: "<user_request>\n\(normalizedPrompt)\n</user_request>"
-                ),
-            ]
+        var requestMessageList = conversationMessageList
+        requestMessageList.append(
+            AIConversationMessage(
+                roleName: "user",
+                contentText: "<user_request>\n\(normalizedPrompt)\n</user_request>"
+            )
         )
-
-        let rawContent = try await requestCompletion(requestBody: requestBody)
+        let rawContent = try await requestAIConversationResponse(
+            systemPromptText: aiInputSystemPrompt(),
+            conversationMessageList: requestMessageList
+        )
         let resultText = Self.cleanAIInput(rawContent)
         guard !resultText.isEmpty else {
             throw TranslationError.emptyResult
@@ -84,9 +77,211 @@ final class TranslationService {
         return resultText
     }
 
-    private func requestCompletion(requestBody: ChatCompletionRequest) async throws -> String {
-        guard let deepSeekAPIKey = inputMethodSettings.deepSeekAPIKey else {
-            throw TranslationError.missingAPIKey
+    private func requestAIConversationResponse(
+        systemPromptText: String,
+        conversationMessageList: [AIConversationMessage]
+    ) async throws -> String {
+        let serviceProvider = inputMethodSettings.aiServiceProvider
+        switch serviceProvider {
+        case .deepSeek:
+            return try await requestChatCompletion(
+                serviceProvider: serviceProvider,
+                systemPromptText: systemPromptText,
+                conversationMessageList: conversationMessageList
+            )
+        case .codexResponses:
+            return try await requestCodexResponses(
+                serviceProvider: serviceProvider,
+                systemPromptText: systemPromptText,
+                conversationMessageList: conversationMessageList
+            )
+        }
+    }
+
+    private func requestAIResponse(
+        systemPromptText: String,
+        inputText: String
+    ) async throws -> String {
+        let serviceProvider = inputMethodSettings.aiServiceProvider
+        switch serviceProvider {
+        case .deepSeek:
+            return try await requestChatCompletion(
+                serviceProvider: serviceProvider,
+                systemPromptText: systemPromptText,
+                inputText: inputText
+            )
+        case .codexResponses:
+            return try await requestCodexResponses(
+                serviceProvider: serviceProvider,
+                systemPromptText: systemPromptText,
+                inputText: inputText
+            )
+        }
+    }
+
+    private func requestChatCompletion(
+        serviceProvider: AIServiceProvider,
+        systemPromptText: String,
+        inputText: String
+    ) async throws -> String {
+        let requestBody = ChatCompletionRequest(
+            modelName: TranslationConfiguration.deepSeekModelName,
+            streamEnabled: false,
+            thinkingConfiguration: ThinkingConfiguration(typeName: "disabled"),
+            temperatureValue: 0,
+            maxTokenCount: TranslationConfiguration.maxOutputTokens,
+            messageList: [
+                ChatMessage(roleName: "system", contentText: systemPromptText),
+                ChatMessage(roleName: "user", contentText: inputText),
+            ]
+        )
+        let encodedBody = try JSONEncoder().encode(requestBody)
+        let responseData = try await performRequest(
+            endpointURL: TranslationConfiguration.deepSeekEndpointURL,
+            serviceProvider: serviceProvider,
+            requestBody: encodedBody
+        )
+        let responseBody: ChatCompletionResponse
+        do {
+            responseBody = try JSONDecoder().decode(ChatCompletionResponse.self, from: responseData)
+        } catch {
+            throw TranslationError.invalidResponse
+        }
+        guard let rawContent = responseBody.choiceList.first?.messageValue.contentText else {
+            throw TranslationError.emptyResult
+        }
+        return rawContent
+    }
+
+    private func requestChatCompletion(
+        serviceProvider: AIServiceProvider,
+        systemPromptText: String,
+        conversationMessageList: [AIConversationMessage]
+    ) async throws -> String {
+        let requestBody = ChatCompletionRequest(
+            modelName: TranslationConfiguration.deepSeekModelName,
+            streamEnabled: false,
+            thinkingConfiguration: ThinkingConfiguration(typeName: "disabled"),
+            temperatureValue: 0,
+            maxTokenCount: TranslationConfiguration.maxOutputTokens,
+            messageList: [
+                ChatMessage(roleName: "system", contentText: systemPromptText),
+            ] + conversationMessageList.map { message in
+                ChatMessage(roleName: message.roleName, contentText: message.contentText)
+            }
+        )
+        let encodedBody = try JSONEncoder().encode(requestBody)
+        let responseData = try await performRequest(
+            endpointURL: TranslationConfiguration.deepSeekEndpointURL,
+            serviceProvider: serviceProvider,
+            requestBody: encodedBody
+        )
+        let responseBody: ChatCompletionResponse
+        do {
+            responseBody = try JSONDecoder().decode(ChatCompletionResponse.self, from: responseData)
+        } catch {
+            throw TranslationError.invalidResponse
+        }
+        guard let rawContent = responseBody.choiceList.first?.messageValue.contentText else {
+            throw TranslationError.emptyResult
+        }
+        return rawContent
+    }
+
+    private func requestCodexResponses(
+        serviceProvider: AIServiceProvider,
+        systemPromptText: String,
+        inputText: String
+    ) async throws -> String {
+        let requestBody = ResponsesRequest(
+            modelName: TranslationConfiguration.codexResponsesModelName,
+            instructionText: systemPromptText,
+            inputText: inputText,
+            maxOutputTokenCount: TranslationConfiguration.maxOutputTokens,
+            storeEnabled: false
+        )
+        let encodedBody = try JSONEncoder().encode(requestBody)
+        let responseData = try await performRequest(
+            endpointURL: TranslationConfiguration.codexResponsesEndpointURL,
+            serviceProvider: serviceProvider,
+            requestBody: encodedBody
+        )
+        let responseBody: ResponsesResponse
+        do {
+            responseBody = try JSONDecoder().decode(ResponsesResponse.self, from: responseData)
+        } catch {
+            throw TranslationError.invalidResponse
+        }
+        if let outputText = responseBody.outputText?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !outputText.isEmpty {
+            return outputText
+        }
+        for outputItem in responseBody.outputItemList ?? [] {
+            for contentItem in outputItem.contentList ?? [] {
+                if let textValue = contentItem.textValue,
+                   !textValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return textValue
+                }
+            }
+        }
+        throw TranslationError.emptyResult
+    }
+
+    private func requestCodexResponses(
+        serviceProvider: AIServiceProvider,
+        systemPromptText: String,
+        conversationMessageList: [AIConversationMessage]
+    ) async throws -> String {
+        let requestBody = ResponsesConversationRequest(
+            modelName: TranslationConfiguration.codexResponsesModelName,
+            instructionText: systemPromptText,
+            inputMessageList: conversationMessageList.map { message in
+                ResponsesInputMessage(
+                    roleName: message.roleName,
+                    contentText: message.contentText
+                )
+            },
+            maxOutputTokenCount: TranslationConfiguration.maxOutputTokens,
+            storeEnabled: false
+        )
+        let encodedBody = try JSONEncoder().encode(requestBody)
+        let responseData = try await performRequest(
+            endpointURL: TranslationConfiguration.codexResponsesEndpointURL,
+            serviceProvider: serviceProvider,
+            requestBody: encodedBody
+        )
+        return try decodeCodexResponse(responseData)
+    }
+
+    private func decodeCodexResponse(_ responseData: Data) throws -> String {
+        let responseBody: ResponsesResponse
+        do {
+            responseBody = try JSONDecoder().decode(ResponsesResponse.self, from: responseData)
+        } catch {
+            throw TranslationError.invalidResponse
+        }
+        if let outputText = responseBody.outputText?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !outputText.isEmpty {
+            return outputText
+        }
+        for outputItem in responseBody.outputItemList ?? [] {
+            for contentItem in outputItem.contentList ?? [] {
+                if let textValue = contentItem.textValue,
+                   !textValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return textValue
+                }
+            }
+        }
+        throw TranslationError.emptyResult
+    }
+
+    private func performRequest(
+        endpointURL: URL,
+        serviceProvider: AIServiceProvider,
+        requestBody: Data
+    ) async throws -> Data {
+        guard let apiKey = inputMethodSettings.apiKey(for: serviceProvider) else {
+            throw TranslationError.missingAPIKey(serviceProvider)
         }
 
         var request = URLRequest(url: endpointURL)
@@ -96,8 +291,8 @@ final class TranslationService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
-        request.setValue("Bearer \(deepSeekAPIKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONEncoder().encode(requestBody)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = requestBody
 
         let responseData: Data
         let urlResponse: URLResponse
@@ -110,19 +305,12 @@ final class TranslationService {
             throw TranslationError.invalidResponse
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
-            throw TranslationError.server(statusCode: httpResponse.statusCode)
+            throw TranslationError.server(
+                serviceProvider: serviceProvider,
+                statusCode: httpResponse.statusCode
+            )
         }
-
-        let responseBody: ChatCompletionResponse
-        do {
-            responseBody = try JSONDecoder().decode(ChatCompletionResponse.self, from: responseData)
-        } catch {
-            throw TranslationError.invalidResponse
-        }
-        guard let rawContent = responseBody.choiceList.first?.messageValue.contentText else {
-            throw TranslationError.emptyResult
-        }
-        return rawContent
+        return responseData
     }
 
     private func systemPrompt() -> String {
@@ -145,9 +333,9 @@ final class TranslationService {
 
     private func aiInputSystemPrompt() -> String {
         """
-        你是 Typing Chao 的一次性 AI 输入助手。本次请求只有一个独立任务，不包含任何历史对话。
+        你是 Typing Chao 的连续对话 AI 输入助手。当前请求会包含本地面板内已经完成的历史消息。
 
-        根据 <user_request> 标签内的用户要求，直接生成可以使用的最终内容。
+        根据最新一条 <user_request> 的用户要求，结合此前对话上下文，直接生成可以使用的最终内容。
 
         严格遵守：
         1. 只输出最终结果，不输出分析过程、思考过程、语言标签或多轮对话内容。
@@ -205,10 +393,12 @@ final class TranslationService {
 
 }
 
-// DeepSeek 官方接口固定使用 HTTPS；客户端不接受隐藏端点或其它代理配置覆盖。
+// DeepSeek 固定直连官方 HTTPS；Codex Responses 固定使用本机 CLIProxyAPI 端点。
 private enum TranslationConfiguration {
-    static let endpointURL = URL(string: "https://api.deepseek.com/chat/completions")!
-    static let modelName = "deepseek-v4-flash"
+    static let deepSeekEndpointURL = URL(string: "https://api.deepseek.com/chat/completions")!
+    static let codexResponsesEndpointURL = URL(string: "http://127.0.0.1:8317/v1/responses")!
+    static let deepSeekModelName = "deepseek-v4-flash"
+    static let codexResponsesModelName = "gpt-5.6-luna"
     static let sourceLanguageName = "Simplified Chinese"
     static let requestTimeout: TimeInterval = 20
     static let maxOutputTokens = 1024
@@ -224,16 +414,16 @@ private enum TranslationConfiguration {
 }
 
 enum TranslationError: LocalizedError {
-    case missingAPIKey
+    case missingAPIKey(AIServiceProvider)
     case network(URLError.Code)
     case invalidResponse
-    case server(statusCode: Int)
+    case server(serviceProvider: AIServiceProvider, statusCode: Int)
     case emptyResult
 
     var errorDescription: String? {
         switch self {
-        case .missingAPIKey:
-            return "请先在输入法设置中配置 DeepSeek Key"
+        case let .missingAPIKey(serviceProvider):
+            return "\(serviceProvider.displayName) Key 无法使用，请检查输入法设置中的服务选择和 Key"
         case let .network(networkCode):
             switch networkCode {
             case .notConnectedToInternet:
@@ -249,10 +439,12 @@ enum TranslationError: LocalizedError {
             }
         case .invalidResponse:
             return "翻译服务返回了无法识别的响应"
-        case let .server(statusCode):
+        case let .server(serviceProvider, statusCode):
             switch statusCode {
             case 401:
-                return "DeepSeek Key 无效，请在输入法设置中更新"
+                return "\(serviceProvider.displayName) Key 错误或无权限，请在输入法设置中更新"
+            case 403:
+                return "\(serviceProvider.displayName) Key 错误或无权限，请在输入法设置中更新"
             case 402:
                 return "翻译服务额度暂不可用，请稍后再试"
             case 429:
@@ -323,5 +515,74 @@ private struct ChatCompletionChoice: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case messageValue = "message"
+    }
+}
+
+// 映射 OpenAI Responses API 的本地会话请求，关闭 store 以避免保存输入法内容。
+private struct ResponsesRequest: Encodable {
+    let modelName: String
+    let instructionText: String
+    let inputText: String
+    let maxOutputTokenCount: Int
+    let storeEnabled: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case modelName = "model"
+        case instructionText = "instructions"
+        case inputText = "input"
+        case maxOutputTokenCount = "max_output_tokens"
+        case storeEnabled = "store"
+    }
+}
+
+private struct ResponsesConversationRequest: Encodable {
+    let modelName: String
+    let instructionText: String
+    let inputMessageList: [ResponsesInputMessage]
+    let maxOutputTokenCount: Int
+    let storeEnabled: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case modelName = "model"
+        case instructionText = "instructions"
+        case inputMessageList = "input"
+        case maxOutputTokenCount = "max_output_tokens"
+        case storeEnabled = "store"
+    }
+}
+
+private struct ResponsesInputMessage: Encodable {
+    let roleName: String
+    let contentText: String
+
+    enum CodingKeys: String, CodingKey {
+        case roleName = "role"
+        case contentText = "content"
+    }
+}
+
+private struct ResponsesResponse: Decodable {
+    let outputText: String?
+    let outputItemList: [ResponsesOutputItem]?
+
+    enum CodingKeys: String, CodingKey {
+        case outputText = "output_text"
+        case outputItemList = "output"
+    }
+}
+
+private struct ResponsesOutputItem: Decodable {
+    let contentList: [ResponsesOutputContent]?
+
+    enum CodingKeys: String, CodingKey {
+        case contentList = "content"
+    }
+}
+
+private struct ResponsesOutputContent: Decodable {
+    let textValue: String?
+
+    enum CodingKeys: String, CodingKey {
+        case textValue = "text"
     }
 }

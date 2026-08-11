@@ -244,6 +244,18 @@ int main(int argc, const char* argv[]) {
         [halfShapeSnapshot[@"isFullShape"] boolValue]) {
       return 14;
     }
+    NSDictionary<NSString*, id>* equalSnapshot = [session processKey:@"=" modifiers:@[]];
+    if (![equalSnapshot[@"handled"] boolValue] ||
+        ![equalSnapshot[@"commitText"] isEqualToString:@"="] ||
+        [equalSnapshot[@"preedit"] length] != 0) {
+      return 29;
+    }
+    NSDictionary<NSString*, id>* plusSnapshot = [session processKey:@"+" modifiers:@[]];
+    if (![plusSnapshot[@"handled"] boolValue] ||
+        ![plusSnapshot[@"commitText"] isEqualToString:@"+"] ||
+        [plusSnapshot[@"preedit"] length] != 0) {
+      return 28;
+    }
     [session setOption:@"ascii_punct" enabled:NO];
     NSDictionary<NSString*, id>* westernPunctuationSnapshot = [session processKey:@"." modifiers:@[@"Control"]];
     if (![westernPunctuationSnapshot[@"handled"] boolValue] ||
@@ -255,7 +267,7 @@ int main(int argc, const char* argv[]) {
         [chinesePunctuationSnapshot[@"isAsciiPunctuation"] boolValue]) {
       return 16;
     }
-    printf("Rime bridge smoke test passed: full/double/T9/Wubi schema selection, direct text, real candidate paging, Escape composition clear, Backspace composition editing, Return raw commit, punctuation commit, direct symbol selection, explicit commit, option, Shift-Space width, and Control-Period punctuation toggles\n");
+    printf("Rime bridge smoke test passed: full/double/T9/Wubi schema selection, direct text, real candidate paging, Escape composition clear, Backspace composition editing, Return raw commit, punctuation commit, direct symbol selection, explicit commit, option, Shift-Space width, equal/shifted plus, and Control-Period punctuation toggles\n");
   }
   return 0;
 }

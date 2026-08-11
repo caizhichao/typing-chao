@@ -23,9 +23,12 @@ final class TypingChaoInputController: IMKInputController {
     private var inputMethodMenu: InputMethodMenu?
     private let aiInputOverlay = AIInputOverlay()
     private var aiInputCommandState = AIInputCommandState()
+    private var pendingAIInputSelection: AIInputSelectionContext?
+    private var activeAIInputSelection: AIInputSelectionContext?
     private var aiInputTask: Task<Void, Never>?
     private var aiInputRequestGeneration = 0
     private var isPresentingAIInput = false
+    private var suppressNextHostReturnAfterAICommand = false
 
     override init(server: IMKServer!, delegate: Any!, client inputClient: Any!) {
         super.init(server: server, delegate: delegate, client: inputClient)
@@ -64,14 +67,20 @@ final class TypingChaoInputController: IMKInputController {
                 self?.commitOriginalTranslationDraft()
             }
         }
-        aiInputOverlay.setRequestHandler { [weak self] promptText in
-            self?.requestAIInput(promptText: promptText)
+        aiInputOverlay.setRequestHandler { [weak self] promptText, conversationMessageList in
+            self?.requestAIInput(
+                promptText: promptText,
+                conversationMessageList: conversationMessageList
+            )
         }
         aiInputOverlay.setCommitHandler { [weak self] resultText in
             self?.commitAIInputResult(resultText: resultText)
         }
-        aiInputOverlay.setCloseHandler { [weak self] in
-            self?.closeAIInput()
+        aiInputOverlay.setServiceProviderHandler { serviceProvider in
+            InputMethodSettings.shared.setAIServiceProvider(serviceProvider)
+        }
+        aiInputOverlay.setKeyHandler { [weak self] event in
+            self?.handleAIInputOverlayKey(event) ?? true
         }
         sessionClient = inputClient as? IMKTextInput
         lastClient = sessionClient
@@ -99,6 +108,8 @@ final class TypingChaoInputController: IMKInputController {
         }
         Self.activeOverlayController = self
         aiInputCommandState.reset()
+        suppressNextInputTextEqualsCallback = false
+        suppressNextKeyDownEqualsCallback = false
         resetTranslationContext()
         closeAIInput()
         rimeSession?.clearComposition()
@@ -118,12 +129,12 @@ final class TypingChaoInputController: IMKInputController {
     }
 
     override func deactivateServer(_ sender: Any!) {
-        // AI 面板可见时仍由原宿主 IMK 会话处理按键，不能因辅助层回调提前结束会话。
+        // AI 面板可见时仍由当前控制器处理面板按键，不能因辅助层回调提前结束会话。
         if isActiveAIInputController {
             return
         }
         // 输入源切出前先上屏原文，避免输入法持有的 marked draft 因会话结束而丢失。
-        commitPendingAIInputCommand(client: lastClient)
+        discardPendingAIInputCommand(client: lastClient)
         closeAIInput()
         commitOriginalTranslationDraft()
         resetTranslationContext()
@@ -152,7 +163,7 @@ final class TypingChaoInputController: IMKInputController {
 
     // 输入会话销毁时取消所有网络和宿主变更观察任务，避免客户端代理被异步任务继续持有。
     override func inputControllerWillClose() {
-        commitPendingAIInputCommand(client: lastClient)
+        discardPendingAIInputCommand(client: lastClient)
         closeAIInput()
         if Self.activeOverlayController === self {
             Self.activeOverlayController = nil
@@ -184,7 +195,7 @@ final class TypingChaoInputController: IMKInputController {
         prepareClient(client)
 
         if event.type != .keyDown {
-            commitPendingAIInputCommand(client: client)
+            discardPendingAIInputCommand(client: client)
             if event.type == .leftMouseDown || event.type == .rightMouseDown {
                 overlayAnchorCache.reset()
                 _ = resolvedOverlayAnchor(client: client, allowsCachedAnchor: false)
@@ -201,10 +212,30 @@ final class TypingChaoInputController: IMKInputController {
         }
 
         let keyName = keyName(for: event) ?? ""
+        if keyName == "Return",
+           suppressNextHostReturnAfterAICommand {
+            suppressNextHostReturnAfterAICommand = false
+            return true
+        }
         if aiInputOverlay.isVisible {
             return handleAIInputKey(event: event, keyName: keyName, client: client)
         }
+        let candidateAnchorBeforeEquals = keyName == AIInputCommandState.triggerText &&
+            isPlainAIInputCommandKey(event)
+            ? resolvedOverlayAnchor(client: client, allowsCachedAnchor: false)
+            : nil
+        let wasPendingAIInputCommand = aiInputCommandState.isPending
         if handleAIInputCommandKey(event: event, keyName: keyName, client: client) {
+            return true
+        }
+        let showsAIInputCandidateAfterEquals = !wasPendingAIInputCommand &&
+            aiInputCommandState.isPending &&
+            keyName == AIInputCommandState.triggerText
+        if showsAIInputCandidateAfterEquals {
+            markPendingAIInputEquals(
+                client: client,
+                fallbackAnchor: candidateAnchorBeforeEquals
+            )
             return true
         }
         if event.modifierFlags.contains([.control, .shift]),
@@ -239,6 +270,20 @@ final class TypingChaoInputController: IMKInputController {
             candidateOverlay.hide()
             return false
         }
+        if let shiftedKeyName = shiftedCharacterKeyName(for: event) {
+            let shiftedSnapshot = processRimeKey(
+                shiftedKeyName,
+                modifiers: []
+            )
+            guard let shiftedSnapshot else {
+                return false
+            }
+            guard shiftedSnapshot.handled else {
+                return handleUnhandledKey(shiftedKeyName, client: client)
+            }
+            updateClient(client, snapshot: shiftedSnapshot)
+            return true
+        }
         let modifierNameList = modifierNames(for: event.modifierFlags)
         guard let snapshot = processRimeKey(keyName, modifiers: modifierNameList) else {
             return false
@@ -250,6 +295,85 @@ final class TypingChaoInputController: IMKInputController {
         return true
     }
 
+    // IMK 的 Return 可能从 inputText 入口再次到达；AI 候选确认期间必须在该入口也截断宿主回车。
+    override func inputText(_ string: String!, client sender: Any!) -> Bool {
+        guard let client = sender as? IMKTextInput else {
+            return super.inputText(string, client: sender)
+        }
+        prepareClient(client)
+        // AI 面板仍复用当前控制器的 IMK 会话；同一轮 Return 可能再次经 inputText 回传，必须全部截断，不能交给宿主。
+        if aiInputOverlay.isVisible {
+            guard let inputKeyName = TranslationPolicy.rimeKeyName(for: string) else {
+                return true
+            }
+            if inputKeyName == "BackSpace" || inputKeyName == "Delete" {
+                return true
+            }
+            if inputKeyName == "Return" {
+                if suppressNextHostReturnAfterAICommand {
+                    suppressNextHostReturnAfterAICommand = false
+                } else if aiInputOverlay.acceptsPromptInput {
+                    aiInputOverlay.submitPrompt()
+                }
+            }
+            return true
+        }
+        guard let inputKeyName = TranslationPolicy.rimeKeyName(for: string) else {
+            discardPendingAIInputCommand(client: client)
+            return super.inputText(string, client: sender)
+        }
+        if inputKeyName == AIInputCommandState.triggerText {
+            let candidateAnchorBeforeEquals = resolvedOverlayAnchor(
+                client: client,
+                allowsCachedAnchor: false
+            )
+            if suppressNextInputTextEqualsCallback {
+                suppressNextInputTextEqualsCallback = false
+                return true
+            }
+            let wasPending = aiInputCommandState.isPending
+            let isHandled = handleAIInputCommand(
+                keyName: inputKeyName,
+                isPlainKey: true,
+                client: client
+            )
+            if isHandled {
+                return true
+            }
+            if !wasPending, aiInputCommandState.isPending {
+                armNextKeyDownEqualsSuppression()
+                markPendingAIInputEquals(
+                    client: client,
+                    fallbackAnchor: candidateAnchorBeforeEquals
+                )
+                return true
+            }
+            if wasPending {
+                return processStandaloneEquals(client: client)
+            }
+        }
+        if aiInputCommandState.isPending,
+           inputKeyName != "Return" {
+            discardPendingAIInputCommand(client: client)
+        }
+        guard inputKeyName == "Return" else {
+            return super.inputText(string, client: sender)
+        }
+        if suppressNextHostReturnAfterAICommand {
+            suppressNextHostReturnAfterAICommand = false
+            return true
+        }
+        if aiInputCommandState.isPending, aiInputCommandState.isTriggerReady {
+            suppressNextHostReturnAfterAICommand = true
+            DispatchQueue.main.async { [weak self] in
+                self?.suppressNextHostReturnAfterAICommand = false
+            }
+            showAIInput(client: client)
+            return true
+        }
+        return super.inputText(string, client: sender)
+    }
+
     // 外部要求结束组字时先收口 librime，再把完整内部草稿作为原文一次性提交宿主。
     override func commitComposition(_ sender: Any!) {
         guard let client = sender as? IMKTextInput else {
@@ -257,9 +381,15 @@ final class TypingChaoInputController: IMKInputController {
             return
         }
         prepareClient(client)
-        if aiInputCommandState.isPending {
-            commitPendingAIInputCommand(client: client)
-            commitOriginalTranslationDraft(client: client)
+        if aiInputOverlay.isVisible {
+            return
+        }
+        if aiInputCommandState.isPending, aiInputCommandState.isTriggerReady {
+            suppressNextHostReturnAfterAICommand = true
+            DispatchQueue.main.async { [weak self] in
+                self?.suppressNextHostReturnAfterAICommand = false
+            }
+            showAIInput(client: client)
             return
         }
         if let rimeSession {
@@ -713,7 +843,7 @@ final class TypingChaoInputController: IMKInputController {
 
     // 候选条与输入法菜单共用同一个设置入口，窗口打开时读取当前会话快照。
     func showSettings() {
-        commitPendingAIInputCommand(client: lastClient)
+        discardPendingAIInputCommand(client: lastClient)
         candidateOverlay.hide()
         inputModeStatusOverlay.hide()
         let schemaList = (rimeSession?.schemaList() ?? []).map { RimeSchemaItem(dictionary: $0) }
@@ -724,13 +854,16 @@ final class TypingChaoInputController: IMKInputController {
         )
     }
 
-    // 菜单和候选条入口复用当前活动编辑客户端，统一打开同一个 AI 面板。
+    // 菜单和候选条入口复用当前活动编辑客户端，选中文本时一并带入 AI 面板。
     func showAIInput() {
         guard let lastClient else {
             NSLog("TypingChao cannot show AI input without an active client")
             return
         }
-        showAIInput(client: lastClient)
+        showAIInput(
+            client: lastClient,
+            selectionContext: selectedAIInputSelectionContext(from: lastClient)
+        )
     }
 
 
@@ -888,7 +1021,7 @@ final class TypingChaoInputController: IMKInputController {
         guard !isActiveAIInputController else {
             return
         }
-        commitPendingAIInputCommand(client: lastClient)
+        discardPendingAIInputCommand(client: lastClient)
         closeAIInput()
         commitOriginalTranslationDraft()
         resetTranslationContext()
@@ -1108,7 +1241,10 @@ final class TypingChaoInputController: IMKInputController {
     }
 
     // 输入法内部入口直接展示 AI 输入，不依赖宿主可能提前消费的全局快捷键。
-    private func showAIInput(client: IMKTextInput) {
+    private func showAIInput(
+        client: IMKTextInput,
+        selectionContext: AIInputSelectionContext? = nil
+    ) {
         if let activeAIInputController = Self.activeAIInputController,
            activeAIInputController !== self,
            activeAIInputController.aiInputOverlay.isVisible {
@@ -1120,27 +1256,48 @@ final class TypingChaoInputController: IMKInputController {
         guard !isSecureInputActive else {
             return
         }
+        let resolvedSelectionContext = selectionContext ?? pendingAIInputSelection
         discardPendingAIInputCommand(client: client)
         Self.activeAIInputController = self
         isPresentingAIInput = true
         defer { isPresentingAIInput = false }
-        presentAIInput(client: client, anchor: resolvedOverlayAnchor(client: client))
+        presentAIInput(
+            client: client,
+            anchor: resolvedOverlayAnchor(client: client),
+            selectionContext: resolvedSelectionContext
+        )
     }
 
     // AI 输入统一收口当前草稿和辅助浮层；没有可信光标时由面板居中展示。
-    private func presentAIInput(client: IMKTextInput, anchor: InputOverlayAnchor?) {
+    private func presentAIInput(
+        client: IMKTextInput,
+        anchor: InputOverlayAnchor?,
+        selectionContext: AIInputSelectionContext?
+    ) {
         commitOriginalTranslationDraft(client: client)
         resetTranslationContext()
         rimeSession?.clearComposition()
         currentRimeSnapshot = RimeSnapshot(dictionary: rimeSession?.currentSnapshot() ?? [:])
+        client.setMarkedText(
+            "",
+            selectionRange: NSRange(location: 0, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
         candidateOverlay.hide()
         translationOverlay.hide()
         inputModeStatusOverlay.hide()
-        aiInputOverlay.show(anchor: anchor)
+        activeAIInputSelection = selectionContext
+        aiInputOverlay.show(
+            anchor: anchor,
+            prefilledPromptText: selectionContext?.selectedText ?? ""
+        )
     }
 
-    // 每次 AI 提交都是独立请求，旧请求取消后不得把结果写回新输入框。
-    private func requestAIInput(promptText: String) {
+    // 每次 AI 提交都携带当前面板会话历史，旧请求取消后不得把结果写回新输入框。
+    private func requestAIInput(
+        promptText: String,
+        conversationMessageList: [AIConversationMessage]
+    ) {
         guard aiInputOverlay.isVisible else { return }
         guard !isSecureInputActive else {
             NSLog("TypingChao rejected AI input request during secure event input")
@@ -1154,7 +1311,8 @@ final class TypingChaoInputController: IMKInputController {
             guard let self else { return }
             do {
                 let resultText = try await self.translationService.requestAIInput(
-                    promptText: promptText
+                    promptText: promptText,
+                    conversationMessageList: conversationMessageList
                 )
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
@@ -1187,10 +1345,16 @@ final class TypingChaoInputController: IMKInputController {
             closeAIInput()
             return
         }
+        let replacementRange = activeAIInputSelection.flatMap { selectionContext in
+            guard lastClient.selectedRange() == selectionContext.replacementRange else {
+                return nil
+            }
+            return selectionContext.replacementRange
+        } ?? NSRange(location: NSNotFound, length: 0)
         closeAIInput()
         lastClient.insertText(
             resultText,
-            replacementRange: NSRange(location: NSNotFound, length: 0)
+            replacementRange: replacementRange
         )
     }
 
@@ -1200,6 +1364,8 @@ final class TypingChaoInputController: IMKInputController {
         aiInputRequestGeneration += 1
         aiInputTask?.cancel()
         aiInputTask = nil
+        pendingAIInputSelection = nil
+        activeAIInputSelection = nil
         rimeSession?.clearComposition()
         currentRimeSnapshot = RimeSnapshot(dictionary: rimeSession?.currentSnapshot() ?? [:])
         candidateOverlay.hide()
@@ -1209,7 +1375,17 @@ final class TypingChaoInputController: IMKInputController {
         }
     }
 
-    // AI 面板保持原宿主焦点，并用 Enter、Command-Enter、Escape 收口主要操作，减少鼠标依赖。
+    // AI 面板成为第一响应者后仍复用当前 Rime 会话，确保焦点和回退键只作用于面板。
+    private func handleAIInputOverlayKey(_ event: NSEvent) -> Bool {
+        guard let client = lastClient,
+              let keyName = keyName(for: event),
+              !keyName.isEmpty else {
+            return true
+        }
+        return handleAIInputKey(event: event, keyName: keyName, client: client)
+    }
+
+    // AI 面板输入用 Enter、Command-Enter、Escape 收口主要操作，减少鼠标依赖。
     private func handleAIInputKey(
         event: NSEvent,
         keyName: String,
@@ -1224,6 +1400,13 @@ final class TypingChaoInputController: IMKInputController {
             return true
         }
         guard aiInputOverlay.acceptsPromptInput else { return true }
+        if keyName == "BackSpace", !currentRimeSnapshot.isComposing {
+            aiInputOverlay.deleteBackwardPromptText()
+            return true
+        }
+        if keyName == "Delete" {
+            return true
+        }
         if event.modifierFlags.contains(.command) {
             if keyName == "Return", aiInputOverlay.canCommitResult {
                 aiInputOverlay.commitResult()
@@ -1242,13 +1425,27 @@ final class TypingChaoInputController: IMKInputController {
             return true
         }
         let previousSnapshot = currentRimeSnapshot
+        if !previousSnapshot.isComposing,
+           let literalText = aiInputLiteralText(for: event, keyName: keyName) {
+            aiInputOverlay.appendPromptText(literalText)
+            return true
+        }
+        let shiftedKeyName = shiftedCharacterKeyName(for: event)
+        let inputKeyName = shiftedKeyName ?? keyName
+        let inputModifierNames = shiftedKeyName == nil
+            ? modifierNames(for: event.modifierFlags)
+            : []
         guard let snapshot = processRimeKey(
-            keyName,
-            modifiers: modifierNames(for: event.modifierFlags)
+            inputKeyName,
+            modifiers: inputModifierNames
         ) else {
             if keyName == "BackSpace", !previousSnapshot.isComposing {
                 aiInputOverlay.deleteBackwardPromptText()
             }
+            return true
+        }
+        if let shiftedKeyName, !snapshot.handled {
+            aiInputOverlay.appendPromptText(shiftedKeyName)
             return true
         }
         updateAIInputOverlay(client: client, snapshot: snapshot)
@@ -1261,70 +1458,56 @@ final class TypingChaoInputController: IMKInputController {
         return true
     }
 
-    // 单个等号先保持为可见 marked text，数字 1 和回车均确认首位 AI 候选。
-    private func handleAIInputCommandKey(
-        event: NSEvent,
-        keyName: String,
-        client: IMKTextInput
-    ) -> Bool {
-        let isPlainKey = isPlainAIInputCommandKey(event)
-        if aiInputCommandState.isPending, isPlainKey {
-            if keyName == "BackSpace" {
-                updateAIInputCommandMarkedText(
-                    aiInputCommandState.deleteBackward(),
-                    client: client
-                )
-                return true
-            }
-            if keyName == "Escape" {
-                discardPendingAIInputCommand(client: client)
-                return true
-            }
-            if (keyName == "1" || keyName == "Return"),
-               aiInputCommandState.isTriggerReady {
-                showAIInput(client: client)
-                return true
-            }
+    // AI 面板只复用 Rime 的中文组字；空组合态的数字、符号、空格和大写字母按普通文本输入。
+    private func aiInputLiteralText(for event: NSEvent, keyName: String) -> String? {
+        let blockingModifierFlags: NSEvent.ModifierFlags = [.control, .option, .command]
+        guard event.modifierFlags.intersection(blockingModifierFlags).isEmpty else {
+            return nil
         }
-
-        let canStartAIInputCommand =
-            !currentRimeSnapshot.isComposing &&
-            !translationDraft.hasText &&
-            !currentRimeSnapshot.isAsciiMode &&
-            !isSecureInputActive
-        guard aiInputCommandState.isPending || canStartAIInputCommand else {
-            return false
+        if keyName == "space" {
+            return " "
         }
-        switch aiInputCommandState.consume(
-            keyName: keyName,
-            isPlainKey: isPlainKey
-        ) {
-        case .passThrough:
-            return false
-        case .updateMarkedText(let textValue):
-            updateAIInputCommandMarkedText(textValue, client: client)
-            return true
-        case .commitMarkedText(let textValue):
-            commitAIInputCommandText(textValue, client: client)
-            return false
+        if let shiftedKeyName = shiftedCharacterKeyName(for: event) {
+            return shiftedKeyName
         }
+        guard let characters = event.characters,
+              characters.count == 1,
+              let scalar = characters.unicodeScalars.first,
+              CharacterSet.decimalDigits.contains(scalar) ||
+                CharacterSet.punctuationCharacters.contains(scalar) ||
+                CharacterSet.symbols.contains(scalar) else {
+            return nil
+        }
+        return characters
     }
 
-    // 用户输入的等号必须立即显示，并同步展示可由数字 1 确认的首位 AI 候选。
-    private func updateAIInputCommandMarkedText(
-        _ textValue: String,
-        client: IMKTextInput
-    ) {
-        guard !textValue.isEmpty else {
-            client.setMarkedText(
-                "",
-                selectionRange: NSRange(location: 0, length: 0),
-                replacementRange: NSRange(location: NSNotFound, length: 0)
-            )
-            candidateOverlay.hide()
-            return
+    // 只读取用户当前明确选中的范围，不读取宿主正文或后台内容。
+    private func selectedAIInputSelectionContext(from client: IMKTextInput) -> AIInputSelectionContext? {
+        let selectedRange = client.selectedRange()
+        guard selectedRange.location != NSNotFound,
+              selectedRange.length > 0,
+              let attributedText = client.attributedSubstring(from: selectedRange) else {
+            return nil
         }
-        let markedText = NSMutableAttributedString(string: textValue)
+        let selectedText = attributedText.string
+        guard !selectedText.isEmpty else {
+            return nil
+        }
+        return AIInputSelectionContext(
+            selectedText: selectedText,
+            replacementRange: selectedRange
+        )
+    }
+
+    private var suppressNextInputTextEqualsCallback = false
+    private var suppressNextKeyDownEqualsCallback = false
+
+    // 单独等号保持为可见 marked text，使候选确认期间回车继续由输入法消费。
+    private func markPendingAIInputEquals(
+        client: IMKTextInput,
+        fallbackAnchor: InputOverlayAnchor?
+    ) {
+        let markedText = NSMutableAttributedString(string: AIInputCommandState.triggerText)
         markedText.addAttribute(
             .underlineStyle,
             value: NSUnderlineStyle.single.rawValue,
@@ -1335,54 +1518,151 @@ final class TypingChaoInputController: IMKInputController {
             selectionRange: NSRange(location: markedText.length, length: 0),
             replacementRange: NSRange(location: NSNotFound, length: 0)
         )
-        guard aiInputCommandState.isTriggerReady,
-              let anchor = resolvedOverlayAnchor(client: client, allowsCachedAnchor: false) else {
+        showAIInputCommandCandidate(
+            client: client,
+            fallbackAnchor: fallbackAnchor
+        )
+    }
+
+    // 重复等号先提交上一枚 marked 等号，再按普通 Rime 符号继续处理当前按键。
+    private func processStandaloneEquals(client: IMKTextInput) -> Bool {
+        guard let snapshot = processRimeKey(
+            AIInputCommandState.triggerText,
+            modifiers: []
+        ) else {
+            return false
+        }
+        guard snapshot.handled else {
+            return handleUnhandledKey(
+                AIInputCommandState.triggerText,
+                client: client
+            )
+        }
+        updateClient(client, snapshot: snapshot)
+        return true
+    }
+
+    private func armNextInputTextEqualsSuppression() {
+        suppressNextInputTextEqualsCallback = true
+        DispatchQueue.main.async { [weak self] in
+            self?.suppressNextInputTextEqualsCallback = false
+        }
+    }
+
+    private func armNextKeyDownEqualsSuppression() {
+        suppressNextKeyDownEqualsCallback = true
+        DispatchQueue.main.async { [weak self] in
+            self?.suppressNextKeyDownEqualsCallback = false
+        }
+    }
+
+    // 单独等号进入可见 marked 状态；其它按键先提交它，再继续原输入链路。
+    private func handleAIInputCommandKey(
+        event: NSEvent,
+        keyName: String,
+        client: IMKTextInput
+    ) -> Bool {
+        let isPlainKey = isPlainAIInputCommandKey(event)
+        if isPlainKey,
+           keyName == AIInputCommandState.triggerText,
+           suppressNextKeyDownEqualsCallback {
+            suppressNextKeyDownEqualsCallback = false
+            return true
+        }
+        let wasPending = aiInputCommandState.isPending
+        let isHandled = handleAIInputCommand(
+            keyName: keyName,
+            isPlainKey: isPlainKey,
+            client: client
+        )
+        if !isHandled,
+           !wasPending,
+           aiInputCommandState.isPending,
+           keyName == AIInputCommandState.triggerText {
+            armNextInputTextEqualsSuppression()
+        }
+        return isHandled
+    }
+
+    // 统一处理 keyDown 和 inputText 两条 IMK 入口，确保单等号不会从另一条路径漏回宿主。
+    private func handleAIInputCommand(
+        keyName: String,
+        isPlainKey: Bool,
+        client: IMKTextInput
+    ) -> Bool {
+        if aiInputCommandState.isPending {
+            if isPlainKey,
+               keyName == AIInputCommandState.triggerText {
+                discardPendingAIInputCommand(client: client)
+                return false
+            }
+            if isPlainKey,
+               (keyName == "1" || keyName == "Return") {
+                if keyName == "Return" {
+                    suppressNextHostReturnAfterAICommand = true
+                    DispatchQueue.main.async { [weak self] in
+                        self?.suppressNextHostReturnAfterAICommand = false
+                    }
+                }
+                showAIInput(client: client)
+                return true
+            }
+            if isPlainKey,
+               keyName == "Escape" {
+                discardPendingAIInputCommand(client: client)
+                return true
+            }
+            discardPendingAIInputCommand(client: client)
+            return false
+        }
+
+        guard !currentRimeSnapshot.isComposing,
+              !translationDraft.hasText,
+              !isSecureInputActive,
+              isPlainKey,
+              keyName == AIInputCommandState.triggerText,
+              aiInputCommandState.activateTrigger(
+                  keyName: keyName,
+                  isPlainKey: isPlainKey
+              ) else {
+            return false
+        }
+        pendingAIInputSelection = nil
+        return false
+    }
+
+    // 等号已经由普通输入链路写入，这里只在其上方附加 AI 候选，不修改宿主文本。
+    private func showAIInputCommandCandidate(
+        client: IMKTextInput,
+        fallbackAnchor: InputOverlayAnchor? = nil
+    ) {
+        guard aiInputCommandState.isTriggerReady else {
+            candidateOverlay.hide()
+            return
+        }
+        let anchor = fallbackAnchor ??
+            resolvedOverlayAnchor(client: client, allowsCachedAnchor: false)
+        guard let anchor else {
             candidateOverlay.hide()
             return
         }
         candidateOverlay.showAIInputTrigger(anchor: anchor)
     }
 
-    // 命令未完整匹配时按当前输入模式提交已显示文本，后续按键继续走原有主链。
-    private func commitAIInputCommandText(
-        _ textValue: String,
-        client: IMKTextInput
-    ) {
-        guard !textValue.isEmpty else {
-            return
-        }
-        client.setMarkedText(
-            "",
-            selectionRange: NSRange(location: 0, length: 0),
-            replacementRange: NSRange(location: NSNotFound, length: 0)
-        )
-        candidateOverlay.hide()
-        handleConfirmedTextInput(textValue, client: client)
-    }
-
-    // 鼠标、会话切换或显式提交到来时把未确认前缀按普通文本收口，不能静默丢失。
-    private func commitPendingAIInputCommand(client: IMKTextInput?) {
-        guard aiInputCommandState.isPending, let client else {
-            return
-        }
-        commitAIInputCommandText(
-            aiInputCommandState.flushPendingText(),
-            client: client
-        )
-    }
-
-    // 用户确认 AI 候选时只移除等号 marked text，不把命令字符写入宿主正文。
-    private func discardPendingAIInputCommand(client: IMKTextInput) {
-        guard aiInputCommandState.isPending else {
-            return
+    // AI 候选确认、取消或输入其它按键时先提交可见等号，再清理候选状态。
+    private func discardPendingAIInputCommand(client: IMKTextInput?) {
+        if aiInputCommandState.isPending,
+           let client {
+            client.insertText(
+                AIInputCommandState.triggerText,
+                replacementRange: NSRange(location: NSNotFound, length: 0)
+            )
         }
         aiInputCommandState.reset()
-        client.setMarkedText(
-            "",
-            selectionRange: NSRange(location: 0, length: 0),
-            replacementRange: NSRange(location: NSNotFound, length: 0)
-        )
+        suppressNextInputTextEqualsCallback = false
+        suppressNextKeyDownEqualsCallback = false
         candidateOverlay.hide()
+        pendingAIInputSelection = nil
     }
 
     private func isPlainAIInputCommandKey(_ event: NSEvent) -> Bool {
@@ -1461,6 +1741,24 @@ final class TypingChaoInputController: IMKInputController {
         return keyName(for: Int(event.keyCode))
     }
 
+    // Shift 加字母或标点使用实际字符重新交给 Rime，避免把修饰键状态误当成未修饰输入。
+    private func shiftedCharacterKeyName(for event: NSEvent) -> String? {
+        let blockingModifierFlags: NSEvent.ModifierFlags = [.control, .option, .command]
+        guard event.modifierFlags.contains(.shift),
+              event.modifierFlags.intersection(blockingModifierFlags).isEmpty,
+              event.keyCode != UInt16(kVK_Space),
+              let characters = event.characters,
+              characters != event.charactersIgnoringModifiers,
+              characters.count == 1,
+              let scalar = characters.unicodeScalars.first,
+              CharacterSet.letters.contains(scalar) ||
+              CharacterSet.punctuationCharacters.contains(scalar) ||
+                CharacterSet.symbols.contains(scalar) else {
+            return nil
+        }
+        return characters
+    }
+
     private func keyName(for keyCode: Int) -> String {
         if let pagingKeyName = RimeInputPolicy.candidatePagingKeyName(
             forPhysicalKeyCode: keyCode
@@ -1474,6 +1772,8 @@ final class TypingChaoInputController: IMKInputController {
         case 49: return "space"
         case 51: return "BackSpace"
         case 53: return "Escape"
+        case 56: return "Shift_L"
+        case 60: return "Shift_R"
         case 115: return "Home"
         case 116: return "Page_Up"
         case 117: return "Delete"

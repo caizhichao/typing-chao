@@ -116,7 +116,7 @@ struct RimeInputPolicySmoke {
             keyName: "KP_Add",
             snapshot: firstPageSnapshot
         ) == false else {
-            fatalError("首屏候选应识别字符和命名加号进入下一页，减号仍保留普通输入语义")
+            fatalError("首屏候选应识别等号和加号进入下一页，减号仍保留普通输入语义")
         }
 
         guard RimeInputPolicy.candidatePagingKeyName(
@@ -151,8 +151,16 @@ struct RimeInputPolicySmoke {
         RimeInputPolicy.candidatePageBackward(
             keyName: "KP_Subtract",
             snapshot: middlePageSnapshot
-        ) == true else {
-            fatalError("非首屏候选应识别字符和命名减号返回上一页")
+        ) == true,
+        RimeInputPolicy.candidatePageBackward(
+            keyName: "=",
+            snapshot: middlePageSnapshot
+        ) == false,
+        RimeInputPolicy.candidatePageBackward(
+            keyName: "KP_Add",
+            snapshot: middlePageSnapshot
+        ) == false else {
+            fatalError("中间页候选应识别减号回上一页、等号和加号进入下一页")
         }
 
         let lastPageSnapshot = snapshot(
@@ -165,8 +173,12 @@ struct RimeInputPolicySmoke {
         guard RimeInputPolicy.candidatePageBackward(
             keyName: "=",
             snapshot: lastPageSnapshot
+        ) == nil,
+        RimeInputPolicy.candidatePageBackward(
+            keyName: "+",
+            snapshot: lastPageSnapshot
         ) == nil else {
-            fatalError("末页不应继续吞掉等号或加号")
+            fatalError("末页等号和加号也应恢复普通输入")
         }
 
         print("Rime input policy smoke test passed: direct symbols, full shape, pinyin delimiter, and minus/plus paging")
@@ -200,7 +212,7 @@ struct RimeInputPolicySmoke {
 
 // 测试值对应 macOS ANSI 键盘虚拟键码，只用于验证无文本回调的翻页键恢复。
 private enum CandidatePagingKeyCode {
-    static let ansiEqual = 0x18 // 主键盘等号/加号键
+    static let ansiEqual = 0x18 // 主键盘等号键，必须保留普通输入
     static let ansiMinus = 0x1B // 主键盘减号键
     static let keypadPlus = 0x45 // 数字键盘加号键
     static let keypadMinus = 0x4E // 数字键盘减号键

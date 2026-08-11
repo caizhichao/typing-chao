@@ -19,6 +19,9 @@ struct InputMethodSettingsSmoke {
         guard settings.targetLanguage == .english else {
             fatalError("target language should default to English")
         }
+        guard settings.aiServiceProvider == .deepSeek else {
+            fatalError("AI service should default to DeepSeek")
+        }
         guard settings.selectedSchemaIdentifier == nil else {
             fatalError("schema should default to the Rime default")
         }
@@ -35,6 +38,12 @@ struct InputMethodSettingsSmoke {
         guard settings.deepSeekAPIKey == "test-deepseek-key" else {
             fatalError("DeepSeek API key should be cached in user settings")
         }
+        settings.setAIServiceProvider(.codexResponses)
+        guard settings.setCurrentAPIKey("  test-codex-key  "),
+              settings.codexAPIKey == "test-codex-key",
+              settings.currentAPIKey == "test-codex-key" else {
+            fatalError("Codex Responses API key should be cached for the selected service")
+        }
         settings.persistRimeOptionStateList([
             RimeOptionState(optionName: .asciiMode, isEnabled: true),
             RimeOptionState(optionName: .fullShape, isEnabled: true),
@@ -49,6 +58,9 @@ struct InputMethodSettingsSmoke {
         guard settings.selectedSchemaIdentifier == "typing_double_pinyin_natural" else {
             fatalError("schema setting was not persisted")
         }
+        guard settings.aiServiceProvider == .codexResponses else {
+            fatalError("AI service selection was not persisted")
+        }
         let storedOptionStateList = settings.persistedRimeOptionStateList()
         guard !storedOptionStateList.contains(where: { $0.optionName == .asciiMode }) else {
             fatalError("ascii mode must stay session scoped")
@@ -60,6 +72,9 @@ struct InputMethodSettingsSmoke {
         }
         guard settings.setDeepSeekAPIKey(""), settings.deepSeekAPIKey == nil else {
             fatalError("DeepSeek API key should be removable from user settings")
+        }
+        guard settings.setAPIKey("", for: .codexResponses), settings.codexAPIKey == nil else {
+            fatalError("Codex Responses API key should be removable from user settings")
         }
         print("Input method settings smoke test passed: translation, target language, schema, and Rime option scope")
     }
