@@ -120,7 +120,9 @@ final class TypingChaoWebView: WKWebView, WKNavigationDelegate {
     // 原生状态经过 JSON 序列化后再注入，避免字符串拼接让用户内容改变脚本结构。
     func sendMessage(messageType: String, messageData: Any) {
         guard isPageReady else {
-            if let pendingIndex = pendingMessageList.lastIndex(where: { $0.messageType == messageType }) {
+            if messageType == "aiInputCommand" {
+                pendingMessageList.append((messageType, messageData))
+            } else if let pendingIndex = pendingMessageList.lastIndex(where: { $0.messageType == messageType }) {
                 pendingMessageList[pendingIndex] = (messageType, messageData)
             } else {
                 pendingMessageList.append((messageType, messageData))

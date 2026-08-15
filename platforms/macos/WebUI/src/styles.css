@@ -753,6 +753,10 @@ html[data-view-name="candidate"] #root {
   background: var(--accent);
 }
 
+.candidate-item-ai-trigger {
+  grid-template-columns: 16px 22px minmax(0, 1fr);
+}
+
 .candidate-label {
   align-self: center;
   color: var(--text-tertiary);
@@ -801,6 +805,7 @@ html[data-view-name="candidate"] #root {
 }
 
 .candidate-ai-mark {
+  grid-column: 2;
   align-self: center;
   color: var(--accent);
   font-size: 15px;
@@ -809,6 +814,10 @@ html[data-view-name="candidate"] #root {
 
 .candidate-item-highlighted .candidate-ai-mark {
   color: white;
+}
+
+.candidate-item-ai-trigger .candidate-text {
+  grid-column: 3;
 }
 
 .candidate-trailing {

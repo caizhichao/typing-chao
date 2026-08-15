@@ -25,8 +25,6 @@ final class TypingChaoInputController: IMKInputController {
     private var aiInputCommandState = AIInputCommandState()
     private var pendingAIInputSelection: AIInputSelectionContext?
     private var activeAIInputSelection: AIInputSelectionContext?
-    private var aiInputTask: Task<Void, Never>?
-    private var aiInputRequestGeneration = 0
     private var isPresentingAIInput = false
     private var suppressNextHostReturnAfterAICommand = false
 
@@ -62,14 +60,11 @@ final class TypingChaoInputController: IMKInputController {
                 self?.commitOriginalTranslationDraft()
             }
         }
-        aiInputOverlay.setRequestHandler { [weak self] promptText, conversationMessageList in
-            self?.requestAIInput(
-                promptText: promptText,
-                conversationMessageList: conversationMessageList
-            )
-        }
         aiInputOverlay.setCommitHandler { [weak self] resultText in
             self?.commitAIInputResult(resultText: resultText)
+        }
+        aiInputOverlay.setResultHandler { [weak self] resultText in
+            self?.updateAIInputMarkedResultPreview(resultText)
         }
         aiInputOverlay.setServiceProviderHandler { serviceProvider in
             InputMethodSettings.shared.setAIServiceProvider(serviceProvider)
@@ -1290,52 +1285,6 @@ final class TypingChaoInputController: IMKInputController {
         )
     }
 
-    // 每次 AI 提交都携带当前面板会话历史，旧请求取消后不得把结果写回新输入框。
-    private func requestAIInput(
-        promptText: String,
-        conversationMessageList: [AIConversationMessage]
-    ) {
-        guard aiInputOverlay.isVisible else { return }
-        guard !isSecureInputActive else {
-            NSLog("TypingChao rejected AI input request during secure event input")
-            return
-        }
-        aiInputRequestGeneration += 1
-        let requestGeneration = aiInputRequestGeneration
-        aiInputTask?.cancel()
-        aiInputOverlay.showLoading()
-        aiInputTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                let resultText = try await self.translationService.requestAIInput(
-                    promptText: promptText,
-                    conversationMessageList: conversationMessageList
-                )
-                guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    guard self.aiInputRequestGeneration == requestGeneration,
-                          self.aiInputOverlay.isVisible else {
-                        return
-                    }
-                    self.aiInputTask = nil
-                    self.aiInputOverlay.showResult(resultText)
-                    self.updateAIInputMarkedResultPreview(resultText)
-                }
-            } catch {
-                guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    guard self.aiInputRequestGeneration == requestGeneration,
-                          self.aiInputOverlay.isVisible else {
-                        return
-                    }
-                    self.aiInputTask = nil
-                    self.aiInputOverlay.showError(error.localizedDescription)
-                    NSLog("TypingChao AI input request failed: %@", error.localizedDescription)
-                }
-            }
-        }
-    }
-
     // 快速等号入口同步更新宿主 marked text，让结果可见但仍保持未提交状态。
     private func updateAIInputMarkedResultPreview(_ resultText: String) {
         guard aiInputCommandState.isPending,
@@ -1378,13 +1327,10 @@ final class TypingChaoInputController: IMKInputController {
         closeAIInput()
     }
 
-    // 关闭 AI 面板时恢复未完成的等号输入，并取消异步请求，避免旧结果回写新会话。
+    // 关闭 AI 面板时恢复未完成的等号输入，并通知 React 取消当前直连请求。
     private func closeAIInput() {
         discardPendingAIInputCommand(client: lastClient)
         isPresentingAIInput = false
-        aiInputRequestGeneration += 1
-        aiInputTask?.cancel()
-        aiInputTask = nil
         pendingAIInputSelection = nil
         activeAIInputSelection = nil
         rimeSession?.clearComposition()

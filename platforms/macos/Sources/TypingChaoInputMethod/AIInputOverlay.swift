@@ -1,13 +1,13 @@
 import AppKit
 
-// 提供连续对话 AI 输入面板：React/Tailwind 负责绘制，中文组字仍复用当前 IMK 会话。
+// 提供连续对话 AI 输入面板：React 与 Vercel AI SDK 直连服务，中文组字仍复用当前 IMK 会话。
 final class AIInputOverlay {
     private static let panelSize = NSSize(width: 520, height: 500)
     private static let emptyPanelSize = NSSize(width: 520, height: 164)
     private let panel: AIInputOverlayPanel
     private let contentView: AIInputOverlayContentView
-    private var requestHandler: ((String, [AIConversationMessage]) -> Void)?
     private var commitHandler: ((String) -> Void)?
+    private var resultHandler: ((String) -> Void)?
     private var serviceProviderHandler: ((AIServiceProvider) -> Void)?
     private var currentAnchor: InputOverlayAnchor?
 
@@ -32,14 +32,19 @@ final class AIInputOverlay {
         // 输入区需要允许非激活面板接收第一响应者，避免只能点击后才获得焦点。
         panel.becomesKeyOnlyIfNeeded = false
         panel.acceptsMouseMovedEvents = true
-        contentView.requestHandler = { [weak self] promptText, conversationMessageList in
-            self?.requestHandler?(promptText, conversationMessageList)
-        }
         contentView.commitHandler = { [weak self] resultText in
             self?.commitHandler?(resultText)
         }
+        contentView.resultHandler = { [weak self] resultText in
+            self?.resultHandler?(resultText)
+        }
         contentView.serviceProviderHandler = { [weak self] serviceProvider in
             self?.serviceProviderHandler?(serviceProvider)
+        }
+        contentView.expandedLayoutHandler = { [weak self] isExpanded in
+            guard let self else { return }
+            let panelSize = isExpanded ? Self.panelSize : Self.emptyPanelSize
+            self.setPanelSize(panelSize, anchor: self.currentAnchor)
         }
     }
 
@@ -51,17 +56,17 @@ final class AIInputOverlay {
         contentView.acceptsPromptInput
     }
 
-    // 上次请求已返回结果时允许用 Command-Return 上屏，并由 Web UI 提示当前快捷键。
+    // React 完成真实响应后才允许 Command-Return 上屏，避免将流式中间文本写进宿主。
     var canCommitResult: Bool {
         contentView.canCommitResult
     }
 
-    func setRequestHandler(_ handler: @escaping (String, [AIConversationMessage]) -> Void) {
-        requestHandler = handler
-    }
-
     func setCommitHandler(_ handler: @escaping (String) -> Void) {
         commitHandler = handler
+    }
+
+    func setResultHandler(_ handler: @escaping (String) -> Void) {
+        resultHandler = handler
     }
 
     func setServiceProviderHandler(_ handler: @escaping (AIServiceProvider) -> Void) {
@@ -75,10 +80,7 @@ final class AIInputOverlay {
     // 用户主动触发 AI 输入时让隐藏的原生键盘入口获得焦点，并预填用户明确选中的原文。
     func show(anchor: InputOverlayAnchor?, prefilledPromptText: String = "") {
         currentAnchor = anchor
-        contentView.reset()
-        if !prefilledPromptText.isEmpty {
-            contentView.appendPromptText(prefilledPromptText)
-        }
+        contentView.reset(prefilledPromptText: prefilledPromptText)
         setPanelSize(Self.emptyPanelSize, anchor: anchor)
         if anchor == nil {
             panel.center()
@@ -103,30 +105,14 @@ final class AIInputOverlay {
         contentView.submitPrompt()
     }
 
-    // Command-Return 通过唯一提交入口上屏当前结果。
+    // Command-Return 通过唯一提交入口上屏当前完整结果。
     func commitResult() {
         contentView.commitResult()
     }
 
-    func showLoading() {
-        contentView.setExpandedLayout(true)
-        setPanelSize(Self.panelSize, anchor: currentAnchor)
-        contentView.showLoading()
-    }
-
-    func showResult(_ resultText: String) {
-        contentView.setExpandedLayout(true)
-        setPanelSize(Self.panelSize, anchor: currentAnchor)
-        contentView.showResult(resultText)
-    }
-
-    func showError(_ messageText: String) {
-        contentView.setExpandedLayout(true)
-        setPanelSize(Self.panelSize, anchor: currentAnchor)
-        contentView.showError(messageText)
-    }
-
     func hide() {
+        contentView.cancelRequest()
+        contentView.clearRuntimeConfiguration()
         currentAnchor = nil
         panel.orderOut(nil)
     }
@@ -170,23 +156,16 @@ final class AIInputKeyCaptureView: NSView {
     }
 }
 
-// AI 面板展示当前会话消息记录，服务端不保存输入，客户端每次请求显式携带本地历史。
+// 原生层只同步 IMK 文字事件、运行配置和最终上屏结果，React 在页面内直接执行 AI SDK 请求。
 private final class AIInputOverlayContentView: NSView {
-    var requestHandler: ((String, [AIConversationMessage]) -> Void)?
     var commitHandler: ((String) -> Void)?
+    var resultHandler: ((String) -> Void)?
     var serviceProviderHandler: ((AIServiceProvider) -> Void)?
+    var expandedLayoutHandler: ((Bool) -> Void)?
 
     private let webView = TypingChaoWebView(webViewName: .aiInput, acceptsKeyboardFocus: false)
     private let keyCaptureView = AIInputKeyCaptureView(frame: .zero)
-    private var promptText = ""
-    private var promptComposition = ""
-    private var pendingPromptText = ""
-    private var conversationMessageList: [AIConversationMessage] = []
-    private var pendingAssistantText = ""
-    private var pendingState = "none"
-    private var isExpandedLayout = false
     private var isPromptInputEnabled = true
-    private var hasResult = false
     private var currentResultText = ""
 
     var acceptsPromptInput: Bool {
@@ -194,13 +173,12 @@ private final class AIInputOverlayContentView: NSView {
     }
 
     var canCommitResult: Bool {
-        hasResult && !currentResultText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !currentResultText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         buildView()
-        reset()
     }
 
     required init?(coder: NSCoder) {
@@ -217,99 +195,42 @@ private final class AIInputOverlayContentView: NSView {
         _ = window.makeFirstResponder(keyCaptureView)
     }
 
-    func reset() {
-        promptText = ""
-        promptComposition = ""
-        pendingPromptText = ""
-        conversationMessageList = []
-        pendingAssistantText = ""
-        pendingState = "none"
-        isExpandedLayout = false
+    func reset(prefilledPromptText: String) {
         isPromptInputEnabled = true
-        hasResult = false
         currentResultText = ""
-        sendState()
+        sendRuntimeConfiguration()
+        sendCommand(actionName: "resetConversation", fieldValue: prefilledPromptText)
     }
 
     func appendPromptText(_ textValue: String) {
         guard isPromptInputEnabled, !textValue.isEmpty else { return }
-        promptText += textValue
-        sendState()
+        sendCommand(actionName: "appendPromptText", fieldValue: textValue)
     }
 
     func deleteBackwardPromptText() {
-        guard isPromptInputEnabled, !promptText.isEmpty else { return }
-        let lastRange = promptText.rangeOfComposedCharacterSequence(at: promptText.index(before: promptText.endIndex))
-        promptText.removeSubrange(lastRange)
-        sendState()
+        guard isPromptInputEnabled else { return }
+        sendCommand(actionName: "deleteBackwardPromptText")
     }
 
     func updatePromptComposition(_ textValue: String) {
         guard isPromptInputEnabled else { return }
-        promptComposition = textValue
-        sendState()
+        sendCommand(actionName: "updatePromptComposition", fieldValue: textValue)
     }
 
     func submitPrompt() {
         guard isPromptInputEnabled else { return }
-        let textValue = promptText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !textValue.isEmpty else {
-            pendingAssistantText = "请输入内容后再发送"
-            pendingState = "error"
-            isExpandedLayout = true
-            sendState()
-            return
-        }
-        pendingPromptText = textValue
-        promptText = ""
-        promptComposition = ""
-        requestHandler?(textValue, conversationMessageList)
-        sendState()
+        sendCommand(actionName: "submitPrompt")
     }
 
-    func showLoading() {
-        isPromptInputEnabled = false
-        hasResult = false
-        currentResultText = ""
-        pendingAssistantText = ""
-        pendingState = "loading"
-        sendState()
+    func cancelRequest() {
+        sendCommand(actionName: "cancelRequest")
     }
 
-    func showResult(_ resultText: String) {
-        isPromptInputEnabled = true
-        hasResult = true
-        currentResultText = resultText
-        if !pendingPromptText.isEmpty {
-            conversationMessageList.append(
-                AIConversationMessage(roleName: "user", contentText: pendingPromptText)
-            )
-        }
-        conversationMessageList.append(
-            AIConversationMessage(roleName: "assistant", contentText: resultText)
-        )
-        pendingPromptText = ""
-        pendingAssistantText = ""
-        pendingState = "none"
-        sendState()
+    func clearRuntimeConfiguration() {
+        sendCommand(actionName: "clearRuntimeConfiguration")
     }
 
-    func showError(_ messageText: String) {
-        isPromptInputEnabled = true
-        hasResult = false
-        currentResultText = ""
-        pendingAssistantText = messageText
-        pendingState = "error"
-        sendState()
-    }
-
-    // 请求开始或结果返回时切换到完整聊天面板，空态仍保持紧凑输入框。
-    func setExpandedLayout(_ isExpanded: Bool) {
-        isExpandedLayout = isExpanded
-        sendState()
-    }
-
-    // 只有真实返回结果才允许上屏，避免把占位文案或错误文案写入宿主。
+    // 只有 React 返回完整结果后才允许上屏，避免把错误或流式中间文本写入宿主。
     func commitResult() {
         guard canCommitResult else { return }
         commitHandler?(currentResultText.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -336,7 +257,7 @@ private final class AIInputOverlayContentView: NSView {
         webView.loadBundledPage()
     }
 
-    // AI Web UI 只能请求焦点、服务切换和已有原生操作入口，文本状态始终由 Swift 管理。
+    // Web UI 只能请求焦点、服务切换、运行状态和最终上屏结果，网络请求不再回到 Swift。
     private func handleWebMessage(_ messageBody: [String: Any]) {
         guard let messageType = messageBody["messageType"] as? String else {
             NSLog("TypingChao ignored AI Web UI message without type")
@@ -344,7 +265,6 @@ private final class AIInputOverlayContentView: NSView {
         }
         if messageType == "webViewReady" {
             webView.markPageReady()
-            sendState()
             return
         }
         guard messageType == "aiInputAction",
@@ -360,43 +280,56 @@ private final class AIInputOverlayContentView: NSView {
             guard let rawValue = messageData["fieldValue"] as? String,
                   let serviceProvider = AIServiceProvider(rawValue: rawValue) else { return }
             serviceProviderHandler?(serviceProvider)
-            sendState()
+            sendRuntimeConfiguration()
         case "submitPrompt":
             submitPrompt()
         case "commitResult":
             commitResult()
+        case "setPromptInputEnabled":
+            guard let isEnabled = messageData["fieldValue"] as? Bool else { return }
+            isPromptInputEnabled = isEnabled
+            if isEnabled {
+                focusPromptInput()
+            }
+        case "setExpandedLayout":
+            guard let isExpanded = messageData["fieldValue"] as? Bool else { return }
+            expandedLayoutHandler?(isExpanded)
+        case "setResultText":
+            guard let resultText = messageData["fieldValue"] as? String else { return }
+            currentResultText = resultText
+            resultHandler?(resultText)
+        case "clearResultText":
+            currentResultText = ""
         default:
             NSLog("TypingChao ignored unsupported AI Web UI action: %@", actionName)
         }
     }
 
-    // 页面状态只包含用户正在编辑的提示词和本地会话内容，不暴露 API Key 或原生请求细节。
-    private func sendState() {
+    // React 直连时仅在已打开的页面内存传递当前服务配置，不把 Key 写入源码、构建产物或持久化页面存储。
+    private func sendRuntimeConfiguration() {
+        let serviceProvider = InputMethodSettings.shared.aiServiceProvider
         webView.sendMessage(
-            messageType: "aiInputState",
+            messageType: "aiInputConfiguration",
             messageData: [
-                "promptText": promptText,
-                "promptComposition": promptComposition,
-                "pendingPromptText": pendingPromptText,
-                "conversationMessageList": conversationMessageList.map { messageItem in
-                    [
-                        "roleName": messageItem.roleName,
-                        "contentText": messageItem.contentText,
-                    ]
-                },
-                "pendingAssistantText": pendingAssistantText,
-                "pendingState": pendingState,
-                "serviceProviderIdentifier": InputMethodSettings.shared.aiServiceProvider.rawValue,
+                "serviceProviderIdentifier": serviceProvider.rawValue,
                 "serviceProviderList": AIServiceProvider.allCases.map { providerItem in
                     [
                         "optionIdentifier": providerItem.rawValue,
                         "displayName": providerItem.displayName,
                     ]
                 },
-                "isPromptInputEnabled": isPromptInputEnabled,
-                "isExpandedLayout": isExpandedLayout,
-                "canCommitResult": canCommitResult,
+                "baseURL": InputMethodSettings.shared.baseURL(for: serviceProvider).absoluteString,
+                "modelName": InputMethodSettings.shared.modelName(for: serviceProvider),
+                "apiKey": InputMethodSettings.shared.apiKey(for: serviceProvider) ?? "",
             ]
         )
+    }
+
+    private func sendCommand(actionName: String, fieldValue: Any? = nil) {
+        var commandData: [String: Any] = ["actionName": actionName]
+        if let fieldValue {
+            commandData["fieldValue"] = fieldValue
+        }
+        webView.sendMessage(messageType: "aiInputCommand", messageData: commandData)
     }
 }

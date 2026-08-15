@@ -135,6 +135,16 @@ if (localResponsesAPIKey) {
   console.log("跳过本地 Codex Responses 网络冒烟：未设置 TYPINGCHAO_LOCAL_AI_KEY");
 }
 
+if (localResponsesAPIKey) {
+  runWithEnvironment(
+    "bun",
+    [join(testRoot, "AIInputSDKSmoke.ts")],
+    { TYPINGCHAO_LOCAL_AI_KEY: localResponsesAPIKey },
+  );
+} else {
+  console.log("跳过 React Vercel AI SDK 网络冒烟：未设置 TYPINGCHAO_LOCAL_AI_KEY");
+}
+
 const rimeInputPolicySmokeOutputPath = join(testBinaryRoot, "RimeInputPolicySmoke");
 run("swiftc", [
   "-target",
@@ -796,6 +806,8 @@ function verifyWebUIContract() {
     packageMetadata.scripts?.["build:web-ui"] !== "bun run scripts/macos/build-web-ui.ts" ||
     packageMetadata.dependencies?.react == null ||
     packageMetadata.dependencies?.["react-dom"] == null ||
+    packageMetadata.dependencies?.ai == null ||
+    packageMetadata.dependencies?.["@ai-sdk/openai"] == null ||
     packageMetadata.devDependencies?.tailwindcss == null ||
     packageMetadata.devDependencies?.vite == null
   ) {
@@ -823,6 +835,14 @@ function verifyWebUIContract() {
       "Resources",
       "ThirdPartyLicenses",
       "WebUI.txt",
+    )) ||
+    !existsSync(join(
+      buildRoot,
+      "TypingChao.app",
+      "Contents",
+      "Resources",
+      "ThirdPartyLicenses",
+      "AISDK-NOTICE",
     )) ||
     !buildSource.includes('run("bun", ["run", "build:web-ui"]') ||
     !buildSource.includes('"-framework", "WebKit"') ||
@@ -1050,7 +1070,8 @@ function verifyCandidateSettingsContract() {
     candidateSource.includes("CandidateAIInputButton") ||
     !candidateWebSource.includes("candidate-settings-button") ||
     !candidateWebSource.includes("changePage") ||
-    !candidateWebSource.includes("selectCandidate")
+    !candidateWebSource.includes("selectCandidate") ||
+    !candidateWebSource.includes("candidate-item-ai-trigger")
   ) {
     throw new Error("候选条必须由 React 负责候选、分页和设置入口，并移除尾部 AI 图标");
   }
@@ -1097,10 +1118,6 @@ function verifyAIInputContract() {
     join(sourceRoot, "InputMethodSettingsWindow.swift"),
     "utf8",
   );
-  const menuSource = readFileSync(
-    join(sourceRoot, "InputMethodMenu.swift"),
-    "utf8",
-  );
   const translationServiceSource = readFileSync(
     join(sourceRoot, "TranslationService.swift"),
     "utf8",
@@ -1109,17 +1126,21 @@ function verifyAIInputContract() {
     join(macOSRoot, "WebUI", "src", "AIInputApp.tsx"),
     "utf8",
   );
+  const aiInputSDKSource = readFileSync(
+    join(macOSRoot, "WebUI", "src", "AIInputSDK.ts"),
+    "utf8",
+  );
   const settingsWebSource = readFileSync(
     join(macOSRoot, "WebUI", "src", "SettingsApp.tsx"),
     "utf8",
   );
   const showAIInputBody = swiftMethodBody(controllerSource, "private func showAIInput(");
   const presentAIInputBody = swiftMethodBody(controllerSource, "private func presentAIInput(");
-  const requestAIInputBody = swiftMethodBody(controllerSource, "private func requestAIInput(");
   const markedResultPreviewBody = swiftMethodBody(controllerSource, "private func updateAIInputMarkedResultPreview(");
   const commitAIInputResultBody = swiftMethodBody(controllerSource, "private func commitAIInputResult(");
   const closeAIInputBody = swiftMethodBody(controllerSource, "private func closeAIInput()");
-  for (const requiredContract of [
+
+  for (const requiredControllerToken of [
     "AIInputSelectionContext",
     "prefilledPromptText:",
     "activeAIInputSelection",
@@ -1132,24 +1153,18 @@ function verifyAIInputContract() {
     "suppressNextInputTextEqualsCallback",
     "suppressNextKeyDownEqualsCallback",
     "keyName == AIInputCommandState.triggerText",
-    "return false",
     "showAIInputCommandCandidate",
     "processStandaloneEquals",
     "markPendingAIInputEquals",
-    "if aiInputOverlay.isVisible",
     "discardPendingAIInputCommand",
     "showAIInputTrigger",
     "isTriggerReady",
     'keyName == "1"',
     'keyName == "Return"',
     "showAIInput()",
-    "private func requestAIInput(\n        promptText:",
+    "setResultHandler",
     "commitAIInputResult(resultText:",
-    "presentAIInput(",
-    "selectionContext: resolvedSelectionContext",
     "aiInputOverlay.show(",
-    "prefilledPromptText:",
-    "conversationMessageList: [AIConversationMessage]",
     "activeAIInputController",
     "aiInputOverlay.isVisible",
     "isPresentingAIInput",
@@ -1161,165 +1176,115 @@ function verifyAIInputContract() {
     "aiInputOverlay.canCommitResult",
     "aiInputOverlay.commitResult()",
   ]) {
-    if (!controllerSource.includes(requiredContract)) {
-      throw new Error("macOS AI 输入缺少内部入口或会话收口契约：" + requiredContract);
+    if (!controllerSource.includes(requiredControllerToken)) {
+      throw new Error("macOS AI 输入缺少输入法或最终上屏契约：" + requiredControllerToken);
     }
+  }
+  for (const forbiddenControllerToken of [
+    "private func requestAIInput(",
+    "aiInputTask",
+    "aiInputRequestGeneration",
+    "AIConversationMessage",
+  ]) {
+    if (controllerSource.includes(forbiddenControllerToken)) {
+      throw new Error("Swift 不应继续执行 AI 请求：" + forbiddenControllerToken);
+    }
+  }
+  if (
+    !showAIInputBody.includes("guard !isSecureInputActive") ||
+    !presentAIInputBody.includes("aiInputOverlay.show(") ||
+    !markedResultPreviewBody.includes("setMarkedText") ||
+    !commitAIInputResultBody.includes("insertText") ||
+    !closeAIInputBody.includes("aiInputOverlay.hide()")
+  ) {
+    throw new Error("AI 输入必须保留安全输入、等号预览、宿主上屏和关闭收口");
   }
   if (
     !candidateSource.includes("showAIInputTrigger") ||
     !candidateSource.includes('labelText: "1"') ||
     !candidateSource.includes("isAIInputTriggerVisible") ||
-    candidateSource.includes("CandidateAIInputButton") ||
-    !menuSource.includes('title: "AI 输入…"') ||
-    !menuSource.includes('keyEquivalent: ""')
+    candidateSource.includes("CandidateAIInputButton")
   ) {
-    throw new Error("AI 输入必须保留等号候选和输入法菜单入口，候选尾部不得重复显示 AI 图标");
-  }
-  if (
-    !commandSource.includes('static let triggerText = "="') ||
-    !commandSource.includes("activateTrigger") ||
-    !commandSource.includes("isTriggerReady") ||
-    !commandSource.includes("mutating func reset")
-  ) {
-    throw new Error("AI 快速命令只能由单个普通等号触发");
-  }
-  const resultPreviewIndex = requestAIInputBody.indexOf("updateAIInputMarkedResultPreview(resultText)");
-  const resultInsertIndex = commitAIInputResultBody.indexOf("lastClient.insertText(");
-  const resultResetIndex = commitAIInputResultBody.indexOf("aiInputCommandState.reset()", resultInsertIndex);
-  const resultCloseIndex = commitAIInputResultBody.indexOf("closeAIInput()", resultResetIndex);
-  if (
-    showAIInputBody.includes("discardPendingAIInputCommand") ||
-    !presentAIInputBody.includes("if !aiInputCommandState.isPending") ||
-    resultPreviewIndex < 0 ||
-    !markedResultPreviewBody.includes("aiInputCommandState.isPending") ||
-    !markedResultPreviewBody.includes("activeAIInputSelection == nil") ||
-    !markedResultPreviewBody.includes("lastClient.setMarkedText(") ||
-    !markedResultPreviewBody.includes("replacementRange: NSRange(location: NSNotFound, length: 0)") ||
-    resultInsertIndex < 0 ||
-    resultResetIndex <= resultInsertIndex ||
-    resultCloseIndex <= resultResetIndex ||
-    !closeAIInputBody.includes("discardPendingAIInputCommand(client: lastClient)")
-  ) {
-    throw new Error("AI 快速入口必须保留 marked 区域并同步结果预览，正式确认时才原位上屏");
+    throw new Error("AI 快速入口必须只保留首位候选，不能恢复候选尾部图标");
   }
   for (const removedCommandToken of [
-    "commitMarkedText",
-    "flushPendingText",
-    "deleteBackward",
-    "updateMarkedText",
+    'triggerText = ";;"',
+    'triggerText = "/"',
+    "triggerTextList",
   ]) {
     if (commandSource.includes(removedCommandToken)) {
       throw new Error("AI 快速命令仍保留多字符前缀逻辑：" + removedCommandToken);
     }
   }
-  for (const removedToken of [
-    "AIInputGesturePolicy",
-    "AIInputShortcut",
-    "optionSpace",
-    "TypingChaoAITrace",
-    "typingchao-ai-trace.log",
-  ]) {
-    if (
-      controllerSource.includes(removedToken) ||
-      overlaySource.includes(removedToken) ||
-      settingsSource.includes(removedToken) ||
-      settingsWindowSource.includes(removedToken)
-    ) {
-      throw new Error("AI 输入不应保留失效快捷键或临时诊断：" + removedToken);
-    }
-  }
   if (
-    !overlaySource.includes("panel.center()") ||
-    !overlaySource.includes("panel.makeKeyAndOrderFront(nil)") ||
-    !overlaySource.includes("override var canBecomeKey") ||
-    !overlaySource.includes("final class AIInputKeyCaptureView") ||
-    !overlaySource.includes("acceptsFirstResponder") ||
     !overlaySource.includes("TypingChaoWebView(webViewName: .aiInput, acceptsKeyboardFocus: false)") ||
     !overlaySource.includes("func focusPromptInput()") ||
     !overlaySource.includes("func setKeyHandler(_ handler: @escaping (NSEvent) -> Bool)") ||
-    !overlaySource.includes("pendingPromptText") ||
-    !overlaySource.includes("conversationMessageList") ||
+    !overlaySource.includes('messageType: "aiInputConfiguration"') ||
+    !overlaySource.includes('messageType: "aiInputCommand"') ||
+    !overlaySource.includes('"apiKey": InputMethodSettings.shared.apiKey') ||
+    !overlaySource.includes("func cancelRequest()") ||
+    !overlaySource.includes("func setResultHandler") ||
     !overlaySource.includes("panelSize = NSSize(width: 520, height: 500)") ||
-    !overlaySource.includes("func commitResult()") ||
-    !overlaySource.includes("setServiceProviderHandler") ||
-    !overlaySource.includes('messageType: "aiInputState"') ||
-    !aiInputWebSource.includes("连续对话 · 当前会话保留上下文") ||
-    !aiInputWebSource.includes("conversationMessageList.map") ||
-    !aiInputWebSource.includes("promptComposition") ||
-    !aiInputWebSource.includes("provider-menu") ||
-    !aiInputWebSource.includes("上屏并退出") ||
-    !translationServiceSource.includes("requestAIConversationResponse") ||
-    !translationServiceSource.includes("ResponsesConversationRequest") ||
-    !translationServiceSource.includes("inputMessageList")
+    overlaySource.includes("requestHandler") ||
+    overlaySource.includes("showLoading()") ||
+    overlaySource.includes("showResult(_") ||
+    overlaySource.includes("showError(_")
   ) {
-    throw new Error("AI 输入必须保留当前会话上下文，并由 React 页面显示、原生 IMK 入口接管键盘");
+    throw new Error("AI 原生层必须只保留 IMK 桥接、运行配置和最终上屏结果");
   }
-  for (const removedHintText of [
-    "Enter 重试 · Esc 关闭",
-    "Enter 发送 · ⌘Enter 上屏 · Esc 关闭",
-    'NSButton(title: "关闭"',
-    'NSButton(title: "发送"',
-    'NSButton(title: "上屏结果"',
-    "commitButton",
-    "commitAIInput",
-    "configureActionButton",
+  for (const requiredWebToken of [
+    "连续对话 · 当前会话保留上下文",
+    "conversationMessageList.map",
+    "promptComposition",
+    "provider-menu",
+    "streamAIInputResponse",
+    "cancelRequest",
+    "setResultText",
   ]) {
-    if (overlaySource.includes(removedHintText)) {
-      throw new Error("AI 输入面板不应显示快捷键提示文案：" + removedHintText);
+    if (!aiInputWebSource.includes(requiredWebToken)) {
+      throw new Error("React AI 页面缺少直连会话状态：" + requiredWebToken);
     }
   }
-  for (const requiredServiceToken of [
-    "AIServiceProvider",
-    "codexResponses",
-    "TypingChaoAIServiceProvider",
-    "TypingChaoDeepSeekBaseURL",
-    "TypingChaoCodexBaseURL",
-    "TypingChaoDeepSeekModelName",
-    "TypingChaoCodexModelName",
-    "http://127.0.0.1:8317/v1",
-    "ResponsesRequest",
-    'ResponsesTool(typeName: "web_search")',
-    'case toolList = "tools"',
-    "outputItemList",
+  for (const requiredSDKToken of [
+    'from "ai"',
+    'from "@ai-sdk/openai"',
+    "streamText",
+    "createOpenAI",
+    "serviceProvider.responses",
+    "serviceProvider.chat",
+    "serviceProvider.tools.webSearch()",
+    "AI_REQUEST_TIMEOUT_MILLISECONDS",
+    "APICallError",
+    "store: false",
   ]) {
-    if (
-      !settingsSource.includes(requiredServiceToken) &&
-      !translationServiceSource.includes(requiredServiceToken)
-    ) {
-      throw new Error("AI 服务切换缺少 Responses 契约：" + requiredServiceToken);
+    if (!aiInputSDKSource.includes(requiredSDKToken)) {
+      throw new Error("React AI SDK 直连缺少 Responses 契约：" + requiredSDKToken);
     }
   }
-  for (const requiredSearchPrompt of [
-    "当前请求已提供 web_search 工具",
-    "必须先实际调用 web_search",
-    "即使模型记忆中已有答案也不能跳过搜索",
-    "不得声称没有搜索工具",
+  if (aiInputSDKSource.includes("fetch(")) {
+    throw new Error("AI 页面必须经 Vercel AI SDK 直连，不能退回手写 fetch");
+  }
+  for (const forbiddenServiceToken of [
+    "AIConversationMessage",
+    "requestAIInput(",
+    "requestAIConversationResponse",
+    "ResponsesConversationRequest",
+    "ResponsesInputMessage",
+    "ResponsesTool",
   ]) {
-    if (!translationServiceSource.includes(requiredSearchPrompt)) {
-      throw new Error("Codex AI 默认提示词必须强制实时信息任务实际联网：" + requiredSearchPrompt);
+    if (translationServiceSource.includes(forbiddenServiceToken)) {
+      throw new Error("Swift 翻译服务不应继续承载 AI 问答：" + forbiddenServiceToken);
     }
   }
   if (
-    !translationServiceSource.includes("Key 无法使用") ||
-    !translationServiceSource.includes("Key 错误或无权限") ||
+    !translationServiceSource.includes("func translate(") ||
+    !translationServiceSource.includes("func fetchModelNameList") ||
+    !settingsSource.includes("TypingChaoCodexBaseURL") ||
     !settingsWindowSource.includes('"apiKeyConfigured"') ||
-    !settingsWindowSource.includes('"defaultBaseURL"') ||
-    !settingsWindowSource.includes("fetchAIModelList") ||
-    !settingsWindowSource.includes('messageType: "settingsModelList"') ||
-    !settingsWebSource.includes('type="password"') ||
-    !settingsWebSource.includes("modelNameList") ||
-    !translationServiceSource.includes("fetchModelNameList") ||
-    !settingsSource.includes("modelListURL(for serviceProvider: AIServiceProvider)")
+    !settingsWebSource.includes('type="password"')
   ) {
-    throw new Error("AI 服务切换必须同步 Key/Base URL/模型状态，并支持拉取模型列表");
-  }
-  if (
-    !controllerSource.includes("private func aiInputLiteralText(for event: NSEvent, keyName: String)") ||
-    !controllerSource.includes("aiInputLiteralText(for: event, keyName: keyName)") ||
-    !controllerSource.includes("aiInputOverlay.appendPromptText(literalText)") ||
-    !controllerSource.includes("CharacterSet.decimalDigits")
-  ) {
-    throw new Error("AI 输入面板必须允许数字、符号和空格作为普通文本输入");
+    throw new Error("翻译与设置必须保留现有服务配置边界");
   }
   for (const forbiddenToken of [
     "addGlobalMonitorForEvents",

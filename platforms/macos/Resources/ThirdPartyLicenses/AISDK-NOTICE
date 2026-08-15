@@ -1,0 +1,12 @@
+Vercel AI SDK runtime notices
+
+The macOS AI input Web UI directly bundles these runtime dependencies:
+- ai 7.0.66 — Apache-2.0 (AISDK-LICENSE)
+- @ai-sdk/openai 4.0.42 — Apache-2.0 (AISDKOpenAI-LICENSE)
+- @ai-sdk/provider 4.0.7 — Apache-2.0 (AISDK-LICENSE)
+- @ai-sdk/provider-utils 5.0.27 — Apache-2.0 (AISDK-LICENSE)
+- @ai-sdk/gateway 4.0.52 — Apache-2.0 (AISDK-LICENSE)
+- @workflow/serde 4.1.0 — Apache-2.0 (AISDK-LICENSE)
+- eventsource-parser 3.1.1 — MIT License (EventSourceParser-LICENSE)
+- zod 4.4.3 — MIT License (Zod-LICENSE)
+- json-schema 0.4.0 — AFL-2.1 OR BSD-3-Clause (JSONSchema-LICENSE)

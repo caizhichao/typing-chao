@@ -47,9 +47,14 @@ export default function CandidateApp() {
       <div className="candidate-list">
         {candidateState.candidateList.map((candidateItem, candidateIndex) => {
           const isHighlighted = candidateIndex === candidateState.highlightedIndex;
-          const candidateClassName = isHighlighted
-            ? "candidate-item candidate-item-highlighted"
-            : "candidate-item";
+          const isAIInputTrigger = candidateState.isAIInputTriggerVisible && candidateIndex === 0;
+          let candidateClassName = "candidate-item";
+          if (isHighlighted) {
+            candidateClassName += " candidate-item-highlighted";
+          }
+          if (isAIInputTrigger) {
+            candidateClassName += " candidate-item-ai-trigger";
+          }
           return (
             <button
               className={candidateClassName}
@@ -63,7 +68,7 @@ export default function CandidateApp() {
                 })
               }
             >
-              {candidateState.isAIInputTriggerVisible && candidateIndex === 0 ? (
+              {isAIInputTrigger ? (
                 <>
                   <span className="candidate-label">1</span>
                   <span className="candidate-ai-mark">✦</span>

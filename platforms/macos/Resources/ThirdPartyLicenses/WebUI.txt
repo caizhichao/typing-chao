@@ -6,6 +6,8 @@ Runtime code bundled into the packaged static resources:
 - react 19.2.8 — MIT License (React-LICENSE)
 - react-dom 19.2.8 — MIT License (ReactDOM-LICENSE)
 - tailwindcss 4.3.3 generated stylesheet — MIT License (TailwindCSS-LICENSE)
+- ai 7.0.66 and @ai-sdk/openai 4.0.42 — Apache-2.0 (AISDK-NOTICE)
+- eventsource-parser 3.1.1 and zod 4.4.3 — MIT License (AISDK-NOTICE)
 
 Build-time dependencies not shipped as executable runtimes:
 - @tailwindcss/vite 4.3.3 — MIT License (TailwindVite-LICENSE)
