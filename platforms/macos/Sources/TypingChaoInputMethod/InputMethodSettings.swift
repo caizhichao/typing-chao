@@ -81,6 +81,38 @@ enum AIServiceProvider: String, CaseIterable {
             return "Codex API Key"
         }
     }
+
+    // 每种请求协议保留自己的默认地址和固定接口路径，设置页只覆盖 Base URL。
+    var defaultBaseURL: URL {
+        switch self {
+        case .deepSeek:
+            return URL(string: "https://api.deepseek.com")!
+        case .codexResponses:
+            return URL(string: "http://127.0.0.1:8317/v1")!
+        }
+    }
+
+    var requestPathComponentList: [String] {
+        switch self {
+        case .deepSeek:
+            return ["chat", "completions"]
+        case .codexResponses:
+            return ["responses"]
+        }
+    }
+
+    var defaultModelName: String {
+        switch self {
+        case .deepSeek:
+            return "deepseek-v4-flash"
+        case .codexResponses:
+            return "gpt-5.6-luna"
+        }
+    }
+
+    var modelListPathComponentList: [String] {
+        ["models"]
+    }
 }
 
 // 集中保存本输入法的用户级偏好，不写入其它 Rime 前端或系统输入源配置。
@@ -93,6 +125,10 @@ final class InputMethodSettings {
         static let selectedSchema = "TypingChaoSelectedRimeSchema"
         static let deepSeekAPIKey = "TypingChaoDeepSeekAPIKey"
         static let codexAPIKey = "TypingChaoCodexAPIKey"
+        static let deepSeekBaseURL = "TypingChaoDeepSeekBaseURL"
+        static let codexBaseURL = "TypingChaoCodexBaseURL"
+        static let deepSeekModelName = "TypingChaoDeepSeekModelName"
+        static let codexModelName = "TypingChaoCodexModelName"
         static let aiServiceProvider = "TypingChaoAIServiceProvider"
 
         static let rimeOptionPrefix = "TypingChaoRimeOption."
@@ -100,6 +136,11 @@ final class InputMethodSettings {
         static func rimeOption(_ optionName: RimeRuntimeOption) -> String {
             "\(rimeOptionPrefix)\(optionName.rawValue)"
         }
+    }
+
+    private enum SupportedURLScheme: String {
+        case http
+        case https
     }
 
     private let userDefaults: UserDefaults
@@ -167,6 +208,61 @@ final class InputMethodSettings {
         return apiKey
     }
 
+    // 自定义地址只读取用户明确保存的值，设置页据此决定展示默认占位还是已配置内容。
+    func customBaseURL(for serviceProvider: AIServiceProvider) -> URL? {
+        let baseURLSettingKey: String
+        switch serviceProvider {
+        case .deepSeek:
+            baseURLSettingKey = SettingKey.deepSeekBaseURL
+        case .codexResponses:
+            baseURLSettingKey = SettingKey.codexBaseURL
+        }
+        guard let baseURLText = userDefaults.string(forKey: baseURLSettingKey),
+              let baseURL = URL(string: baseURLText) else {
+            return nil
+        }
+        return baseURL
+    }
+
+    func baseURL(for serviceProvider: AIServiceProvider) -> URL {
+        customBaseURL(for: serviceProvider) ?? serviceProvider.defaultBaseURL
+    }
+
+    // 请求地址始终由当前服务的 Base URL 和固定协议路径组成，避免设置页直接改变请求协议。
+    func requestURL(for serviceProvider: AIServiceProvider) -> URL {
+        var requestURL = baseURL(for: serviceProvider)
+        for pathComponent in serviceProvider.requestPathComponentList {
+            requestURL.appendPathComponent(pathComponent)
+        }
+        return requestURL
+    }
+
+    func modelListURL(for serviceProvider: AIServiceProvider) -> URL {
+        var modelListURL = baseURL(for: serviceProvider)
+        for pathComponent in serviceProvider.modelListPathComponentList {
+            modelListURL.appendPathComponent(pathComponent)
+        }
+        return modelListURL
+    }
+
+    func customModelName(for serviceProvider: AIServiceProvider) -> String? {
+        let modelNameSettingKey: String
+        switch serviceProvider {
+        case .deepSeek:
+            modelNameSettingKey = SettingKey.deepSeekModelName
+        case .codexResponses:
+            modelNameSettingKey = SettingKey.codexModelName
+        }
+        let modelName = userDefaults.string(forKey: modelNameSettingKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let modelName, !modelName.isEmpty else { return nil }
+        return modelName
+    }
+
+    func modelName(for serviceProvider: AIServiceProvider) -> String {
+        customModelName(for: serviceProvider) ?? serviceProvider.defaultModelName
+    }
+
 
     func persistedRimeOptionStateList() -> [RimeOptionState] {
         var optionStateList: [RimeOptionState] = []
@@ -214,6 +310,17 @@ final class InputMethodSettings {
         setAPIKey(apiKey, for: aiServiceProvider)
     }
 
+    // 当前服务的 Base URL 独立保存，切换服务不会覆盖另一套地址。
+    @discardableResult
+    func setCurrentBaseURL(_ baseURL: String) -> Bool {
+        setBaseURL(baseURL, for: aiServiceProvider)
+    }
+
+    @discardableResult
+    func setCurrentModelName(_ modelName: String) -> Bool {
+        setModelName(modelName, for: aiServiceProvider)
+    }
+
     @discardableResult
     func setAPIKey(_ apiKey: String, for serviceProvider: AIServiceProvider) -> Bool {
         let normalizedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -228,6 +335,50 @@ final class InputMethodSettings {
             userDefaults.removeObject(forKey: apiKeySettingKey)
         } else {
             userDefaults.set(normalizedAPIKey, forKey: apiKeySettingKey)
+        }
+        return true
+    }
+
+    @discardableResult
+    func setBaseURL(_ baseURL: String, for serviceProvider: AIServiceProvider) -> Bool {
+        let normalizedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseURLSettingKey: String
+        switch serviceProvider {
+        case .deepSeek:
+            baseURLSettingKey = SettingKey.deepSeekBaseURL
+        case .codexResponses:
+            baseURLSettingKey = SettingKey.codexBaseURL
+        }
+        if normalizedBaseURL.isEmpty {
+            userDefaults.removeObject(forKey: baseURLSettingKey)
+            return true
+        }
+        guard let parsedBaseURL = URL(string: normalizedBaseURL),
+              let schemeName = parsedBaseURL.scheme?.lowercased(),
+              SupportedURLScheme(rawValue: schemeName) != nil,
+              parsedBaseURL.host != nil,
+              parsedBaseURL.query == nil,
+              parsedBaseURL.fragment == nil else {
+            return false
+        }
+        userDefaults.set(parsedBaseURL.absoluteString, forKey: baseURLSettingKey)
+        return true
+    }
+
+    @discardableResult
+    func setModelName(_ modelName: String, for serviceProvider: AIServiceProvider) -> Bool {
+        let normalizedModelName = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let modelNameSettingKey: String
+        switch serviceProvider {
+        case .deepSeek:
+            modelNameSettingKey = SettingKey.deepSeekModelName
+        case .codexResponses:
+            modelNameSettingKey = SettingKey.codexModelName
+        }
+        if normalizedModelName.isEmpty {
+            userDefaults.removeObject(forKey: modelNameSettingKey)
+        } else {
+            userDefaults.set(normalizedModelName, forKey: modelNameSettingKey)
         }
         return true
     }

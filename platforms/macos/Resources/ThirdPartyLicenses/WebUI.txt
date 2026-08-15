@@ -1,0 +1,16 @@
+Typing Chao Web UI third-party notices
+
+The macOS Web UI is built from the project's own TypeScript and CSS source. Exact dependency versions are locked in bun.lock.
+
+Runtime code bundled into the packaged static resources:
+- react 19.2.8 — MIT License (React-LICENSE)
+- react-dom 19.2.8 — MIT License (ReactDOM-LICENSE)
+- tailwindcss 4.3.3 generated stylesheet — MIT License (TailwindCSS-LICENSE)
+
+Build-time dependencies not shipped as executable runtimes:
+- @tailwindcss/vite 4.3.3 — MIT License (TailwindVite-LICENSE)
+- vite 8.2.1 — MIT License (Vite-LICENSE.md)
+- @vitejs/plugin-react 6.0.5 — MIT License (ViteReact-LICENSE)
+- typescript 5.9.3 — Apache-2.0 License (TypeScript-LICENSE.txt)
+- @types/react 19.2.18 — MIT License (ReactTypes-LICENSE)
+- @types/react-dom 19.2.4 — MIT License (ReactDOMTypes-LICENSE)

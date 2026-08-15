@@ -14,3 +14,4 @@ vendor/librime/share/
 local.properties
 .cxx/
 platforms/android/.kotlin/
+node_modules/

@@ -1,6 +1,6 @@
 import AppKit
 
-// 提供输入法进程内的轻量设置窗口，集中暴露边写边译和首版 Rime 基础选项。
+// 提供输入法进程内的设置窗口，React/Tailwind 只负责显示，设置写入仍由原生主链处理。
 final class InputMethodSettingsWindowController: NSWindowController {
     static let shared = InputMethodSettingsWindowController()
 
@@ -10,7 +10,7 @@ final class InputMethodSettingsWindowController: NSWindowController {
 
     private init() {
         let settingsWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 700, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 700),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -18,11 +18,11 @@ final class InputMethodSettingsWindowController: NSWindowController {
         settingsWindow.title = "Typing Chao 设置"
         settingsWindow.isReleasedWhenClosed = false
         settingsWindow.tabbingMode = .disallowed
-        settingsViewController.preferredContentSize = NSSize(width: 700, height: 560)
+        settingsViewController.preferredContentSize = NSSize(width: 700, height: 700)
         settingsWindow.contentViewController = settingsViewController
-        settingsWindow.setContentSize(NSSize(width: 700, height: 560))
-        settingsWindow.contentMinSize = NSSize(width: 700, height: 560)
-        settingsWindow.contentMaxSize = NSSize(width: 700, height: 560)
+        settingsWindow.setContentSize(NSSize(width: 700, height: 700))
+        settingsWindow.contentMinSize = NSSize(width: 700, height: 700)
+        settingsWindow.contentMaxSize = NSSize(width: 700, height: 700)
         super.init(window: settingsWindow)
 
         settingsViewController.translationEnabledHandler = { [weak self] enabled in
@@ -45,6 +45,9 @@ final class InputMethodSettingsWindowController: NSWindowController {
         settingsViewController.apiKeyHandler = { apiKey in
             InputMethodSettings.shared.setCurrentAPIKey(apiKey)
         }
+        settingsViewController.baseURLHandler = { baseURL in
+            InputMethodSettings.shared.setCurrentBaseURL(baseURL)
+        }
         settingsViewController.rimeOptionHandler = { [weak self] optionStateList in
             if let inputController = self?.inputController {
                 inputController.applyRimeOptionStateList(optionStateList)
@@ -61,7 +64,7 @@ final class InputMethodSettingsWindowController: NSWindowController {
         fatalError("init(coder:) has not been implemented")
     }
 
-    // 每次打开都刷新当前 Rime 状态和翻译偏好，避免窗口长期保留旧选项。
+    // 每次打开都刷新当前 Rime 状态和翻译偏好，避免长期保留的 Web 页面展示旧选项。
     func show(
         inputController: TypingChaoInputController,
         snapshot: RimeSnapshot,
@@ -80,636 +83,301 @@ final class InputMethodSettingsWindowController: NSWindowController {
     }
 }
 
-private enum InputMethodSettingsSection: Int {
-    case translation
-    case input
-}
-
-private enum InputMethodSettingsStyle {
-    static let sidebarWidth: CGFloat = 168
-    static let accentColor = NSColor(calibratedRed: 0.03, green: 0.68, blue: 0.59, alpha: 1)
-    static let cardBackgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.72)
-    static let cardBorderColor = NSColor.separatorColor.withAlphaComponent(0.45)
-}
-
-// 负责绘制翻译和输入设置，并把业务变更通过明确回调交给当前输入控制器。
+// 设置页 Web UI 只发送声明式动作；密钥、Rime 会话和网络请求继续留在 Swift 侧。
 private final class InputMethodSettingsViewController: NSViewController {
     var translationEnabledHandler: ((Bool) -> Void)?
     var targetLanguageHandler: ((TranslationTargetLanguage) -> Void)?
     var aiServiceProviderHandler: ((AIServiceProvider) -> Void)?
     var apiKeyHandler: ((String) -> Bool)?
+    var baseURLHandler: ((String) -> Bool)?
     var rimeOptionHandler: (([RimeOptionState]) -> Void)?
-    // 设置页的方案选择必须回到当前 librime 会话，不能只改变界面选中项。
+    // 设置页的方案选择必须回到当前 librime 会话，不能只改变 Web 页面选中项。
     var schemaHandler: ((String) -> Void)?
 
-    private let translationSidebarButton = SettingsSidebarButton(title: "翻译", symbolName: "character.bubble")
-    private let inputSidebarButton = SettingsSidebarButton(title: "输入", symbolName: "keyboard")
-    private let translationPage = NSView()
-    private let inputPage = NSView()
-    private let translationSwitch = NSSwitch()
-    private let apiKeyField = PasteableSecureTextField(frame: .zero)
-    private let pasteAPIKeyButton = NSButton(title: "粘贴", target: nil, action: nil)
-    private let saveAPIKeyButton = NSButton(title: "保存", target: nil, action: nil)
-    private let clearAPIKeyButton = NSButton(title: "清除", target: nil, action: nil)
-    private let aiServiceProviderPopUpButton = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let targetLanguagePopUpButton = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let schemaPopUpButton = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let inputModeControl = NSSegmentedControl(labels: ["中文", "英文"], trackingMode: .selectOne, target: nil, action: nil)
-    private let characterFormControl = NSSegmentedControl(labels: ["简体", "繁体"], trackingMode: .selectOne, target: nil, action: nil)
-    private let punctuationControl = NSSegmentedControl(labels: ["中文", "西文"], trackingMode: .selectOne, target: nil, action: nil)
-    private let characterWidthControl = NSSegmentedControl(labels: ["半角", "全角"], trackingMode: .selectOne, target: nil, action: nil)
+    private let webView = TypingChaoWebView(webViewName: .settings, acceptsKeyboardFocus: true)
+    private var modelFetchTask: Task<Void, Never>?
+    private var currentSchemaList: [RimeSchemaItem] = []
+    private var selectedSchemaIdentifier = ""
+    private var inputModeIdentifier = "chinese"
+    private var characterFormIdentifier = "simplified"
+    private var punctuationModeIdentifier = "chinese"
+    private var characterWidthIdentifier = "half"
+    private var displayedModelNameList: [String] = []
 
-    // 根背景必须按当前窗口外观解析动态颜色，避免深色背景配上浅色模式控件文字。
+    deinit {
+        modelFetchTask?.cancel()
+    }
+
+    // 设置页使用包内静态资源，窗口本身仍是输入法进程内唯一原生宿主。
     override func loadView() {
-        let rootView = SettingsRootView()
-        view = rootView
-        buildSidebar()
-        buildPages()
-        selectSection(.translation)
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 700, height: 700))
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(webView)
+        NSLayoutConstraint.activate([
+            webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            webView.topAnchor.constraint(equalTo: view.topAnchor),
+            webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        webView.setMessageHandler { [weak self] messageBody in
+            self?.handleWebMessage(messageBody)
+        }
+        webView.loadBundledPage()
     }
 
     // 设置窗口出现时同步持久化翻译选项和当前 librime 快照。
     func configure(snapshot: RimeSnapshot, schemaList: [RimeSchemaItem]) {
         _ = view
-        translationSwitch.state = .off
-        if InputMethodSettings.shared.isTranslationEnabled {
-            translationSwitch.state = .on
-        }
-        selectTargetLanguage(InputMethodSettings.shared.targetLanguage)
-        selectAIServiceProvider(InputMethodSettings.shared.aiServiceProvider)
-        updateAPIKeyField()
-        inputModeControl.selectedSegment = 0
-        if snapshot.isAsciiMode {
-            inputModeControl.selectedSegment = 1
-        }
-        characterFormControl.selectedSegment = 1
-        if snapshot.isSimplifiedChinese {
-            characterFormControl.selectedSegment = 0
-        }
-        punctuationControl.selectedSegment = 0
-        if snapshot.isAsciiPunctuation {
-            punctuationControl.selectedSegment = 1
-        }
-        characterWidthControl.selectedSegment = 0
-        if snapshot.isFullShape {
-            characterWidthControl.selectedSegment = 1
-        }
-        configureSchemaList(schemaList, selectedIdentifier: snapshot.schemaIdentifier)
+        currentSchemaList = schemaList
+        selectedSchemaIdentifier = snapshot.schemaIdentifier
+        inputModeIdentifier = snapshot.isAsciiMode ? "english" : "chinese"
+        characterFormIdentifier = snapshot.isSimplifiedChinese ? "simplified" : "traditional"
+        punctuationModeIdentifier = snapshot.isAsciiPunctuation ? "western" : "chinese"
+        characterWidthIdentifier = snapshot.isFullShape ? "full" : "half"
+        resetDisplayedModelNameList()
+        sendSettingsState()
     }
 
+    // Web 页面只允许调用白名单动作，未知消息保留日志并拒绝执行。
+    private func handleWebMessage(_ messageBody: [String: Any]) {
+        guard let messageType = messageBody["messageType"] as? String else {
+            NSLog("TypingChao ignored settings Web UI message without type")
+            return
+        }
+        if messageType == "webViewReady" {
+            webView.markPageReady()
+            sendSettingsState()
+            return
+        }
+        guard messageType == "settingsAction",
+              let messageData = messageBody["messageData"] as? [String: Any],
+              let actionName = messageData["actionName"] as? String else {
+            NSLog("TypingChao ignored unknown settings Web UI message: %@", messageType)
+            return
+        }
+        let fieldValue = messageData["fieldValue"]
+        handleSettingsAction(actionName: actionName, fieldValue: fieldValue)
+    }
 
-    // 侧栏头部展示当前能力和安装包版本，方便直接确认正在运行的新包。
-    private func buildSidebar() {
-        let sidebarView = NSVisualEffectView()
-        sidebarView.material = .sidebar
-        sidebarView.blendingMode = .behindWindow
-        sidebarView.state = .active
-        sidebarView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(sidebarView)
+    // 每个设置动作继续复用原有业务入口，Web UI 不建立第二套持久化或请求状态。
+    private func handleSettingsAction(actionName: String, fieldValue: Any?) {
+        switch actionName {
+        case "setTranslationEnabled":
+            guard let isEnabled = fieldValue as? Bool else { return }
+            translationEnabledHandler?(isEnabled)
+            sendSettingsState()
+        case "setTargetLanguage":
+            guard let rawValue = fieldValue as? String,
+                  let targetLanguage = TranslationTargetLanguage(rawValue: rawValue) else { return }
+            targetLanguageHandler?(targetLanguage)
+            sendSettingsState()
+        case "setServiceProvider":
+            guard let rawValue = fieldValue as? String,
+                  let serviceProvider = AIServiceProvider(rawValue: rawValue) else { return }
+            modelFetchTask?.cancel()
+            modelFetchTask = nil
+            aiServiceProviderHandler?(serviceProvider)
+            resetDisplayedModelNameList()
+            sendSettingsState()
+        case "pasteAPIKey":
+            guard let pastedText = NSPasteboard.general.string(forType: .string) else {
+                sendActionResult(actionName: actionName, isSuccess: false, messageText: "剪贴板中没有可粘贴的文本")
+                return
+            }
+            let normalizedText = pastedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedText.isEmpty else {
+                sendActionResult(actionName: actionName, isSuccess: false, messageText: "剪贴板文本为空，未写入 API Key")
+                return
+            }
+            webView.sendMessage(messageType: "settingsPastedAPIKey", messageData: normalizedText)
+        case "saveAPIKey":
+            guard let apiKey = fieldValue as? String,
+                  apiKeyHandler?(apiKey) == true else {
+                sendActionResult(actionName: actionName, isSuccess: false, messageText: "API Key 保存失败，请确认输入内容后重试")
+                return
+            }
+            sendSettingsState()
+            sendActionResult(actionName: actionName, isSuccess: true, messageText: "API Key 已保存在本机")
+        case "clearAPIKey":
+            guard apiKeyHandler?("") == true else {
+                sendActionResult(actionName: actionName, isSuccess: false, messageText: "API Key 清除失败，请查看输入法日志")
+                return
+            }
+            sendSettingsState()
+            sendActionResult(actionName: actionName, isSuccess: true, messageText: "API Key 已清除")
+        case "saveBaseURL":
+            guard let baseURL = fieldValue as? String,
+                  baseURLHandler?(baseURL) == true else {
+                sendActionResult(
+                    actionName: actionName,
+                    isSuccess: false,
+                    messageText: "Base URL 必须以 http:// 或 https:// 开头、包含主机名且不带查询参数"
+                )
+                return
+            }
+            sendSettingsState()
+            sendActionResult(actionName: actionName, isSuccess: true, messageText: "Base URL 已保存")
+        case "clearBaseURL":
+            guard baseURLHandler?("") == true else {
+                sendActionResult(actionName: actionName, isSuccess: false, messageText: "Base URL 清除失败，请查看输入法日志")
+                return
+            }
+            sendSettingsState()
+            sendActionResult(actionName: actionName, isSuccess: true, messageText: "已恢复当前服务默认地址")
+        case "setModelName":
+            guard let modelName = fieldValue as? String,
+                  InputMethodSettings.shared.setCurrentModelName(modelName) else {
+                sendActionResult(actionName: actionName, isSuccess: false, messageText: "模型名称无效，请重新选择")
+                return
+            }
+            resetDisplayedModelNameList(extraModelNameList: displayedModelNameList)
+            sendSettingsState()
+        case "fetchModelList":
+            fetchAIModelList()
+        case "setSchema":
+            guard let schemaIdentifier = fieldValue as? String else { return }
+            selectedSchemaIdentifier = schemaIdentifier
+            schemaHandler?(schemaIdentifier)
+            sendSettingsState()
+        case "setInputMode":
+            guard let modeIdentifier = fieldValue as? String else { return }
+            inputModeIdentifier = modeIdentifier
+            rimeOptionHandler?([
+                RimeOptionState(optionName: .asciiMode, isEnabled: modeIdentifier == "english"),
+            ])
+            sendSettingsState()
+        case "setCharacterForm":
+            guard let formIdentifier = fieldValue as? String else { return }
+            characterFormIdentifier = formIdentifier
+            rimeOptionHandler?([
+                RimeOptionState(optionName: .simplifiedChinese, isEnabled: formIdentifier == "simplified"),
+                RimeOptionState(optionName: .traditionalChinese, isEnabled: formIdentifier == "traditional"),
+                RimeOptionState(optionName: .hongKongTraditionalChinese, isEnabled: false),
+                RimeOptionState(optionName: .taiwanTraditionalChinese, isEnabled: false),
+            ])
+            sendSettingsState()
+        case "setPunctuationMode":
+            guard let modeIdentifier = fieldValue as? String else { return }
+            punctuationModeIdentifier = modeIdentifier
+            rimeOptionHandler?([
+                RimeOptionState(optionName: .asciiPunctuation, isEnabled: modeIdentifier == "western"),
+            ])
+            sendSettingsState()
+        case "setCharacterWidth":
+            guard let widthIdentifier = fieldValue as? String else { return }
+            characterWidthIdentifier = widthIdentifier
+            rimeOptionHandler?([
+                RimeOptionState(optionName: .fullShape, isEnabled: widthIdentifier == "full"),
+            ])
+            sendSettingsState()
+        default:
+            NSLog("TypingChao ignored unsupported settings action: %@", actionName)
+        }
+    }
 
-        let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
-        let buildVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
-        let titleLabel = makeLabel(text: "Typing Chao", fontSize: 15, weight: .semibold)
-        let subtitleLabel = makeLabel(
-            text: "通用 AI 输入法\n版本 \(shortVersion) (\(buildVersion))",
-            fontSize: 11,
-            weight: .regular
-        )
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.maximumNumberOfLines = 2
+    // 模型列表请求仍由 Swift 网络层执行，服务切换或任务取消后拒绝迟到结果写回。
+    private func fetchAIModelList() {
+        let serviceProvider = InputMethodSettings.shared.aiServiceProvider
+        modelFetchTask?.cancel()
+        webView.sendMessage(messageType: "settingsModelLoading", messageData: true)
+        modelFetchTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let modelNameList = try await TranslationService().fetchModelNameList(for: serviceProvider)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard InputMethodSettings.shared.aiServiceProvider == serviceProvider else { return }
+                    self.modelFetchTask = nil
+                    self.resetDisplayedModelNameList(extraModelNameList: modelNameList)
+                    self.webView.sendMessage(
+                        messageType: "settingsModelList",
+                        messageData: [
+                            "modelName": InputMethodSettings.shared.modelName(for: serviceProvider),
+                            "modelNameList": self.displayedModelNameList,
+                        ]
+                    )
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self.modelFetchTask = nil
+                    self.webView.sendMessage(messageType: "settingsModelLoading", messageData: false)
+                    self.sendActionResult(
+                        actionName: "fetchModelList",
+                        isSuccess: false,
+                        messageText: "模型列表拉取失败：\(error.localizedDescription)"
+                    )
+                    NSLog("TypingChao model list request failed: %@", error.localizedDescription)
+                }
+            }
+        }
+    }
 
-        translationSidebarButton.tag = InputMethodSettingsSection.translation.rawValue
-        translationSidebarButton.target = self
-        translationSidebarButton.action = #selector(selectSidebarSection(_:))
-        inputSidebarButton.tag = InputMethodSettingsSection.input.rawValue
-        inputSidebarButton.target = self
-        inputSidebarButton.action = #selector(selectSidebarSection(_:))
+    private func resetDisplayedModelNameList(extraModelNameList: [String] = []) {
+        let serviceProvider = InputMethodSettings.shared.aiServiceProvider
+        var modelNameSet = Set<String>()
+        displayedModelNameList = ([InputMethodSettings.shared.modelName(for: serviceProvider)] + extraModelNameList)
+            .filter { modelNameSet.insert($0).inserted }
+    }
 
-        let sidebarStack = NSStackView(
-            views: [
-                titleLabel,
-                subtitleLabel,
-                translationSidebarButton,
-                inputSidebarButton,
+    // 设置状态不包含 API Key 正文，React 页面只获知当前服务是否已有本机凭据。
+    private func sendSettingsState() {
+        let settings = InputMethodSettings.shared
+        let serviceProvider = settings.aiServiceProvider
+        let versionName = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let buildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        var versionText = "版本 \(versionName)"
+        if !buildNumber.isEmpty {
+            versionText += " (\(buildNumber))"
+        }
+        webView.sendMessage(
+            messageType: "settingsState",
+            messageData: [
+                "versionText": versionText,
+                "translationEnabled": settings.isTranslationEnabled,
+                "targetLanguageIdentifier": settings.targetLanguage.rawValue,
+                "targetLanguageList": TranslationTargetLanguage.allCases.map { targetLanguage in
+                    [
+                        "optionIdentifier": targetLanguage.rawValue,
+                        "displayName": targetLanguage.displayName,
+                    ]
+                },
+                "serviceProviderIdentifier": serviceProvider.rawValue,
+                "serviceProviderList": AIServiceProvider.allCases.map { providerItem in
+                    [
+                        "optionIdentifier": providerItem.rawValue,
+                        "displayName": providerItem.displayName,
+                        "apiKeyDisplayName": providerItem.apiKeyDisplayName,
+                        "defaultBaseURL": providerItem.defaultBaseURL.absoluteString,
+                    ]
+                },
+                "apiKeyConfigured": settings.apiKey(for: serviceProvider) != nil,
+                "customBaseURL": settings.customBaseURL(for: serviceProvider)?.absoluteString ?? "",
+                "modelName": settings.modelName(for: serviceProvider),
+                "modelNameList": displayedModelNameList,
+                "schemaIdentifier": selectedSchemaIdentifier,
+                "schemaList": currentSchemaList.map { schemaItem in
+                    [
+                        "optionIdentifier": schemaItem.identifier,
+                        "displayName": schemaItem.displayName,
+                    ]
+                },
+                "inputModeIdentifier": inputModeIdentifier,
+                "characterFormIdentifier": characterFormIdentifier,
+                "punctuationModeIdentifier": punctuationModeIdentifier,
+                "characterWidthIdentifier": characterWidthIdentifier,
             ]
         )
-        sidebarStack.orientation = .vertical
-        sidebarStack.alignment = .leading
-        sidebarStack.spacing = 6
-        sidebarStack.setCustomSpacing(20, after: subtitleLabel)
-        sidebarStack.translatesAutoresizingMaskIntoConstraints = false
-        sidebarView.addSubview(sidebarStack)
-
-        NSLayoutConstraint.activate([
-            sidebarView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            sidebarView.topAnchor.constraint(equalTo: view.topAnchor),
-            sidebarView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            sidebarView.widthAnchor.constraint(equalToConstant: InputMethodSettingsStyle.sidebarWidth),
-            sidebarStack.leadingAnchor.constraint(equalTo: sidebarView.leadingAnchor, constant: 18),
-            sidebarStack.trailingAnchor.constraint(equalTo: sidebarView.trailingAnchor, constant: -14),
-            sidebarStack.topAnchor.constraint(equalTo: sidebarView.topAnchor, constant: 22),
-            translationSidebarButton.widthAnchor.constraint(equalTo: sidebarStack.widthAnchor),
-            inputSidebarButton.widthAnchor.constraint(equalTo: sidebarStack.widthAnchor),
-        ])
     }
 
-    private func buildPages() {
-        buildTranslationPage()
-        buildInputPage()
-        for page in [translationPage, inputPage] {
-            page.translatesAutoresizingMaskIntoConstraints = false
-            view.addSubview(page)
-            NSLayoutConstraint.activate([
-                page.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: InputMethodSettingsStyle.sidebarWidth),
-                page.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                page.topAnchor.constraint(equalTo: view.topAnchor),
-                page.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            ])
-        }
-    }
-
-    private func buildTranslationPage() {
-        let titleLabel = makePageTitle("翻译")
-        translationSwitch.target = self
-        translationSwitch.action = #selector(toggleTranslation(_:))
-
-        for targetLanguage in TranslationTargetLanguage.allCases {
-            let menuItem = NSMenuItem(title: targetLanguage.displayName, action: nil, keyEquivalent: "")
-            menuItem.representedObject = targetLanguage.rawValue
-            targetLanguagePopUpButton.menu?.addItem(menuItem)
-        }
-        targetLanguagePopUpButton.target = self
-        targetLanguagePopUpButton.action = #selector(changeTargetLanguage(_:))
-        targetLanguagePopUpButton.widthAnchor.constraint(equalToConstant: 128).isActive = true
-        for serviceProvider in AIServiceProvider.allCases {
-            let menuItem = NSMenuItem(title: serviceProvider.displayName, action: nil, keyEquivalent: "")
-            menuItem.representedObject = serviceProvider.rawValue
-            aiServiceProviderPopUpButton.menu?.addItem(menuItem)
-        }
-        aiServiceProviderPopUpButton.target = self
-        aiServiceProviderPopUpButton.action = #selector(changeAIServiceProvider(_:))
-        aiServiceProviderPopUpButton.widthAnchor.constraint(equalToConstant: 152).isActive = true
-        apiKeyField.widthAnchor.constraint(equalToConstant: 188).isActive = true
-        pasteAPIKeyButton.target = self
-        pasteAPIKeyButton.action = #selector(pasteAPIKey)
-        saveAPIKeyButton.target = self
-        saveAPIKeyButton.action = #selector(saveAPIKey)
-        clearAPIKeyButton.target = self
-        clearAPIKeyButton.action = #selector(clearAPIKey)
-        let apiKeyControl = NSStackView(views: [
-            apiKeyField,
-            pasteAPIKeyButton,
-            saveAPIKeyButton,
-            clearAPIKeyButton,
-        ])
-        apiKeyControl.orientation = .horizontal
-        apiKeyControl.spacing = 6
-        apiKeyControl.translatesAutoresizingMaskIntoConstraints = false
-
-        let translationCard = makeCard(rows: [
-            makeRow(
-                title: "边写边译",
-                subtitle: "拼音提交后等待 1 秒；粘贴时只翻译剪贴板文本",
-                trailingControl: translationSwitch
-            ),
-            makeRow(
-                title: "目标语言",
-                subtitle: "译文会按这里选择的语言生成",
-                trailingControl: targetLanguagePopUpButton
-            ),
-            makeRow(
-                title: "AI 服务",
-                subtitle: "翻译和 AI 输入共用此请求协议",
-                trailingControl: aiServiceProviderPopUpButton
-            ),
-            makeRow(
-                title: "API Key",
-                subtitle: "只缓存在本机设置，不会写入输入法包",
-                trailingControl: apiKeyControl
-            ),
-            makeRow(
-                title: "AI 快速输入",
-                subtitle: "输入 = 后按 1 或回车，也可点击候选条上的 AI 按钮",
-                trailingControl: makeStatusLabel("单轮")
-            ),
-        ])
-        let privacyCard = makeCard(rows: [
-            makeRow(
-                title: "安全输入保护",
-                subtitle: "密码框或系统安全输入开启时，不会发送任何文本",
-                trailingControl: makeStatusLabel("自动启用")
-            ),
-            makeRow(
-                title: "手动翻译",
-                subtitle: "立即翻译当前剪贴板可按 Control + Shift + T",
-                trailingControl: makeStatusLabel("快捷键")
-            ),
-        ])
-        let pageStack = makePageStack(views: [titleLabel, translationCard, privacyCard])
-        installPageStack(pageStack, in: translationPage)
-    }
-
-    private func buildInputPage() {
-        let titleLabel = makePageTitle("输入")
-        for control in [inputModeControl, characterFormControl, punctuationControl, characterWidthControl] {
-            control.segmentStyle = .rounded
-            control.widthAnchor.constraint(equalToConstant: 132).isActive = true
-        }
-        inputModeControl.target = self
-        inputModeControl.action = #selector(changeInputMode(_:))
-        characterFormControl.target = self
-        characterFormControl.action = #selector(changeCharacterForm(_:))
-        punctuationControl.target = self
-        punctuationControl.action = #selector(changePunctuation(_:))
-        characterWidthControl.target = self
-        characterWidthControl.action = #selector(changeCharacterWidth(_:))
-        schemaPopUpButton.target = self
-        schemaPopUpButton.action = #selector(changeSchema(_:))
-        schemaPopUpButton.widthAnchor.constraint(equalToConstant: 168).isActive = true
-
-        let inputModeCard = makeCard(rows: [
-            makeRow(title: "拼音方案", subtitle: "可选择全拼、自然码双拼或小鹤双拼", trailingControl: schemaPopUpButton),
-            makeRow(title: "输入模式", subtitle: "在当前输入法内切换中文或英文", trailingControl: inputModeControl),
-            makeRow(title: "汉字", subtitle: "默认使用简体中文", trailingControl: characterFormControl),
-        ])
-        let characterCard = makeCard(rows: [
-            makeRow(
-                title: "字符宽度",
-                subtitle: "半角使用常规字符；全角转换拉丁字母、数字和空格宽度",
-                trailingControl: characterWidthControl
-            ),
-            makeRow(
-                title: "标点样式",
-                subtitle: "中文或西文标点独立设置，不与字符宽度混为同一状态",
-                trailingControl: punctuationControl
-            ),
-            makeRow(
-                title: "快捷切换",
-                subtitle: "输入时切换半角与全角，切换后显示当前状态",
-                trailingControl: makeStatusLabel("Shift + Space")
-            ),
-        ])
-        let noteLabel = makeLabel(
-            text: "这些设置只影响 Typing Chao，不会切换、删除或修改其它 macOS 输入法。",
-            fontSize: 11,
-            weight: .regular
+    private func sendActionResult(actionName: String, isSuccess: Bool, messageText: String) {
+        webView.sendMessage(
+            messageType: "settingsActionResult",
+            messageData: [
+                "actionName": actionName,
+                "isSuccess": isSuccess,
+                "messageText": messageText,
+            ]
         )
-        noteLabel.textColor = .secondaryLabelColor
-        noteLabel.maximumNumberOfLines = 2
-        let pageStack = makePageStack(views: [titleLabel, inputModeCard, characterCard, noteLabel])
-        installPageStack(pageStack, in: inputPage)
-    }
-
-
-    private func makePageStack(views: [NSView]) -> NSStackView {
-        let stackView = NSStackView(views: views)
-        stackView.orientation = .vertical
-        stackView.alignment = .leading
-        stackView.spacing = 16
-        stackView.translatesAutoresizingMaskIntoConstraints = false
-        return stackView
-    }
-
-    private func installPageStack(_ stackView: NSStackView, in page: NSView) {
-        page.addSubview(stackView)
-        NSLayoutConstraint.activate([
-            stackView.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 28),
-            stackView.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -28),
-            stackView.topAnchor.constraint(equalTo: page.topAnchor, constant: 24),
-        ])
-    }
-
-    private func makePageTitle(_ title: String) -> NSTextField {
-        makeLabel(text: title, fontSize: 22, weight: .semibold)
-    }
-
-    private func makeCard(rows: [NSView]) -> SettingsCardView {
-        let cardView = SettingsCardView()
-        let cardStack = NSStackView()
-        cardStack.orientation = .vertical
-        cardStack.alignment = .leading
-        cardStack.spacing = 0
-        cardStack.translatesAutoresizingMaskIntoConstraints = false
-        cardView.addSubview(cardStack)
-
-        for (rowIndex, rowView) in rows.enumerated() {
-            cardStack.addArrangedSubview(rowView)
-            rowView.widthAnchor.constraint(equalTo: cardStack.widthAnchor).isActive = true
-            if rowIndex < rows.count - 1 {
-                let separator = NSBox()
-                separator.boxType = .separator
-                cardStack.addArrangedSubview(separator)
-                separator.widthAnchor.constraint(equalTo: cardStack.widthAnchor).isActive = true
-            }
-        }
-        NSLayoutConstraint.activate([
-            cardStack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor),
-            cardStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor),
-            cardStack.topAnchor.constraint(equalTo: cardView.topAnchor),
-            cardStack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor),
-            cardView.widthAnchor.constraint(equalToConstant: 462),
-        ])
-        return cardView
-    }
-
-    private func makeRow(title: String, subtitle: String, trailingControl: NSView) -> NSView {
-        let rowView = NSView()
-        rowView.translatesAutoresizingMaskIntoConstraints = false
-        rowView.heightAnchor.constraint(equalToConstant: 64).isActive = true
-
-        let titleLabel = makeLabel(text: title, fontSize: 13.5, weight: .medium)
-        let subtitleLabel = makeLabel(text: subtitle, fontSize: 10.5, weight: .regular)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.maximumNumberOfLines = 2
-        let labelStack = NSStackView(views: [titleLabel, subtitleLabel])
-        labelStack.orientation = .vertical
-        labelStack.alignment = .leading
-        labelStack.spacing = 3
-        labelStack.translatesAutoresizingMaskIntoConstraints = false
-        trailingControl.translatesAutoresizingMaskIntoConstraints = false
-        rowView.addSubview(labelStack)
-        rowView.addSubview(trailingControl)
-
-        NSLayoutConstraint.activate([
-            labelStack.leadingAnchor.constraint(equalTo: rowView.leadingAnchor, constant: 16),
-            labelStack.centerYAnchor.constraint(equalTo: rowView.centerYAnchor),
-            labelStack.trailingAnchor.constraint(lessThanOrEqualTo: trailingControl.leadingAnchor, constant: -14),
-            trailingControl.trailingAnchor.constraint(equalTo: rowView.trailingAnchor, constant: -16),
-            trailingControl.centerYAnchor.constraint(equalTo: rowView.centerYAnchor),
-        ])
-        return rowView
-    }
-
-    private func makeStatusLabel(_ text: String) -> NSTextField {
-        let statusLabel = makeLabel(text: text, fontSize: 11, weight: .medium)
-        statusLabel.textColor = InputMethodSettingsStyle.accentColor
-        return statusLabel
-    }
-
-    private func makeLabel(text: String, fontSize: CGFloat, weight: NSFont.Weight) -> NSTextField {
-        let label = NSTextField(labelWithString: text)
-        label.font = NSFont.systemFont(ofSize: fontSize, weight: weight)
-        label.textColor = .labelColor
-        label.lineBreakMode = .byWordWrapping
-        label.translatesAutoresizingMaskIntoConstraints = false
-        return label
-    }
-
-    private func selectTargetLanguage(_ targetLanguage: TranslationTargetLanguage) {
-        for menuItem in targetLanguagePopUpButton.itemArray {
-            guard menuItem.representedObject as? String == targetLanguage.rawValue else {
-                continue
-            }
-            targetLanguagePopUpButton.select(menuItem)
-            return
-        }
-    }
-
-    private func selectAIServiceProvider(_ serviceProvider: AIServiceProvider) {
-        for menuItem in aiServiceProviderPopUpButton.itemArray {
-            guard menuItem.representedObject as? String == serviceProvider.rawValue else {
-                continue
-            }
-            aiServiceProviderPopUpButton.select(menuItem)
-            return
-        }
-    }
-
-    private func updateAPIKeyField() {
-        let serviceProvider = InputMethodSettings.shared.aiServiceProvider
-        apiKeyField.stringValue = ""
-        apiKeyField.placeholderString = InputMethodSettings.shared.apiKey(for: serviceProvider) == nil
-            ? "输入 \(serviceProvider.apiKeyDisplayName)"
-            : "已配置，输入新 Key 可覆盖"
-    }
-
-    @objc private func pasteAPIKey() {
-        apiKeyField.paste(nil)
-        apiKeyField.window?.makeFirstResponder(apiKeyField)
-    }
-
-    @objc private func saveAPIKey() {
-        guard let apiKeyHandler,
-              apiKeyHandler(apiKeyField.stringValue) else {
-            NSSound.beep()
-            return
-        }
-        apiKeyField.stringValue = ""
-        apiKeyField.placeholderString = "已配置，输入新 Key 可覆盖"
-    }
-
-    @objc private func clearAPIKey() {
-        guard apiKeyHandler?("") == true else {
-            NSSound.beep()
-            return
-        }
-        updateAPIKeyField()
-    }
-
-    // 方案列表只使用当前 librime 已部署结果，避免设置页展示无法切换的静态选项。
-    private func configureSchemaList(_ schemaList: [RimeSchemaItem], selectedIdentifier: String) {
-        schemaPopUpButton.removeAllItems()
-        for schema in schemaList {
-            let menuItem = NSMenuItem(title: schema.displayName, action: nil, keyEquivalent: "")
-            menuItem.representedObject = schema.identifier
-            schemaPopUpButton.menu?.addItem(menuItem)
-            if schema.identifier == selectedIdentifier {
-                schemaPopUpButton.select(menuItem)
-            }
-        }
-        schemaPopUpButton.isEnabled = !schemaList.isEmpty
-    }
-
-    @objc private func selectSidebarSection(_ sender: SettingsSidebarButton) {
-        guard let section = InputMethodSettingsSection(rawValue: sender.tag) else { return }
-        selectSection(section)
-    }
-
-    private func selectSection(_ section: InputMethodSettingsSection) {
-        translationPage.isHidden = section != .translation
-        inputPage.isHidden = section != .input
-        translationSidebarButton.isSelected = section == .translation
-        inputSidebarButton.isSelected = section == .input
-    }
-
-    @objc private func toggleTranslation(_ sender: NSSwitch) {
-        translationEnabledHandler?(sender.state == .on)
-    }
-
-    @objc private func changeTargetLanguage(_ sender: NSPopUpButton) {
-        guard let rawValue = sender.selectedItem?.representedObject as? String,
-              let targetLanguage = TranslationTargetLanguage(rawValue: rawValue) else {
-            return
-        }
-        targetLanguageHandler?(targetLanguage)
-    }
-
-    @objc private func changeAIServiceProvider(_ sender: NSPopUpButton) {
-        guard let rawValue = sender.selectedItem?.representedObject as? String,
-              let serviceProvider = AIServiceProvider(rawValue: rawValue) else {
-            return
-        }
-        aiServiceProviderHandler?(serviceProvider)
-        updateAPIKeyField()
-    }
-
-    @objc private func changeSchema(_ sender: NSPopUpButton) {
-        guard let schemaIdentifier = sender.selectedItem?.representedObject as? String else {
-            return
-        }
-        schemaHandler?(schemaIdentifier)
-    }
-
-    @objc private func changeInputMode(_ sender: NSSegmentedControl) {
-        rimeOptionHandler?([
-            RimeOptionState(optionName: .asciiMode, isEnabled: sender.selectedSegment == 1),
-        ])
-    }
-
-    @objc private func changeCharacterForm(_ sender: NSSegmentedControl) {
-        let usesTraditionalChinese = sender.selectedSegment == 1
-        rimeOptionHandler?([
-            RimeOptionState(optionName: .simplifiedChinese, isEnabled: !usesTraditionalChinese),
-            RimeOptionState(optionName: .traditionalChinese, isEnabled: usesTraditionalChinese),
-            RimeOptionState(optionName: .hongKongTraditionalChinese, isEnabled: false),
-            RimeOptionState(optionName: .taiwanTraditionalChinese, isEnabled: false),
-        ])
-    }
-
-    @objc private func changePunctuation(_ sender: NSSegmentedControl) {
-        rimeOptionHandler?([
-            RimeOptionState(optionName: .asciiPunctuation, isEnabled: sender.selectedSegment == 1),
-        ])
-    }
-
-    @objc private func changeCharacterWidth(_ sender: NSSegmentedControl) {
-        rimeOptionHandler?([
-            RimeOptionState(optionName: .fullShape, isEnabled: sender.selectedSegment == 1),
-        ])
-    }
-}
-
-// API Key 仍使用安全输入框，但允许设置窗口内的 Command-V 和显式粘贴按钮写入当前编辑位置。
-private final class PasteableSecureTextField: NSSecureTextField {
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let modifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if modifierFlags == [.command], event.charactersIgnoringModifiers?.lowercased() == "v" {
-            paste(nil)
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
-    }
-
-    func paste(_ sender: Any?) {
-        guard let pastedText = NSPasteboard.general.string(forType: .string) else {
-            NSSound.beep()
-            return
-        }
-        let normalizedText = pastedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedText.isEmpty else {
-            return
-        }
-        if let fieldEditor = currentEditor() as? NSTextView {
-            fieldEditor.insertText(normalizedText, replacementRange: fieldEditor.selectedRange())
-            return
-        }
-        stringValue = normalizedText
-    }
-}
-
-// 根视图在系统外观变化时重新解析动态背景色，保持背景与原生控件使用同一套明暗模式。
-private final class SettingsRootView: NSView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        updateAppearance()
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updateAppearance()
-    }
-
-    private func updateAppearance() {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        }
-    }
-}
-
-// 卡片图层颜色需要随窗口外观重新解析，不能在初始化时固化成另一种明暗模式。
-private final class SettingsCardView: NSView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.borderWidth = 1
-        layer?.cornerRadius = 10
-        layer?.masksToBounds = true
-        translatesAutoresizingMaskIntoConstraints = false
-        updateAppearance()
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updateAppearance()
-    }
-
-    private func updateAppearance() {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = InputMethodSettingsStyle.cardBackgroundColor.cgColor
-            layer?.borderColor = InputMethodSettingsStyle.cardBorderColor.cgColor
-        }
-    }
-}
-
-// 侧栏按钮用轻量选中底色表达当前页，不引入独立图片资源。
-private final class SettingsSidebarButton: NSButton {
-    var isSelected = false {
-        didSet {
-            updateAppearance()
-        }
-    }
-
-    init(title: String, symbolName: String) {
-        super.init(frame: .zero)
-        self.title = title
-        image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title)
-        imagePosition = .imageLeading
-        alignment = .left
-        font = NSFont.systemFont(ofSize: 13.5, weight: .medium)
-        isBordered = false
-        wantsLayer = true
-        layer?.cornerRadius = 7
-        translatesAutoresizingMaskIntoConstraints = false
-        heightAnchor.constraint(equalToConstant: 34).isActive = true
-        updateAppearance()
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updateAppearance()
-    }
-
-    private func updateAppearance() {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = NSColor.clear.cgColor
-            contentTintColor = .labelColor
-            if isSelected {
-                layer?.backgroundColor = InputMethodSettingsStyle.accentColor.withAlphaComponent(0.18).cgColor
-                contentTintColor = InputMethodSettingsStyle.accentColor
-            }
-        }
     }
 }

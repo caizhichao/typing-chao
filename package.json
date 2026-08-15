@@ -12,6 +12,20 @@
     "install:macos": "bun run scripts/macos/install.ts",
     "build:android": "bun run scripts/android/build.ts",
     "test:android": "bun run scripts/android/test.ts",
-    "install:android": "bun run scripts/android/install.ts"
+    "install:android": "bun run scripts/android/install.ts",
+    "build:web-ui": "bun run scripts/macos/build-web-ui.ts"
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.5",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3",
+    "vite": "8.2.1"
   }
 }

@@ -49,11 +49,6 @@ final class TypingChaoInputController: IMKInputController {
         candidateOverlay.setPageHandler { [weak self] pageBackward in
             self?.changeCandidatePage(pageBackward: pageBackward)
         }
-        candidateOverlay.setAIInputHandler { [weak self] in
-            DispatchQueue.main.async {
-                self?.showAIInput()
-            }
-        }
         candidateOverlay.setSettingsHandler { [weak self] in
             DispatchQueue.main.async {
                 self?.showSettings()
@@ -1257,7 +1252,6 @@ final class TypingChaoInputController: IMKInputController {
             return
         }
         let resolvedSelectionContext = selectionContext ?? pendingAIInputSelection
-        discardPendingAIInputCommand(client: client)
         Self.activeAIInputController = self
         isPresentingAIInput = true
         defer { isPresentingAIInput = false }
@@ -1278,11 +1272,14 @@ final class TypingChaoInputController: IMKInputController {
         resetTranslationContext()
         rimeSession?.clearComposition()
         currentRimeSnapshot = RimeSnapshot(dictionary: rimeSession?.currentSnapshot() ?? [:])
-        client.setMarkedText(
-            "",
-            selectionRange: NSRange(location: 0, length: 0),
-            replacementRange: NSRange(location: NSNotFound, length: 0)
-        )
+        // 快速入口保留 marked 等号作为结果替换范围，菜单和选区入口才清空旧组合文本。
+        if !aiInputCommandState.isPending {
+            client.setMarkedText(
+                "",
+                selectionRange: NSRange(location: 0, length: 0),
+                replacementRange: NSRange(location: NSNotFound, length: 0)
+            )
+        }
         candidateOverlay.hide()
         translationOverlay.hide()
         inputModeStatusOverlay.hide()
@@ -1322,6 +1319,7 @@ final class TypingChaoInputController: IMKInputController {
                     }
                     self.aiInputTask = nil
                     self.aiInputOverlay.showResult(resultText)
+                    self.updateAIInputMarkedResultPreview(resultText)
                 }
             } catch {
                 guard !Task.isCancelled else { return }
@@ -1338,7 +1336,28 @@ final class TypingChaoInputController: IMKInputController {
         }
     }
 
-    // 上屏前关闭 AI 面板，直接把当前结果插入原编辑客户端，不自动再次触发翻译。
+    // 快速等号入口同步更新宿主 marked text，让结果可见但仍保持未提交状态。
+    private func updateAIInputMarkedResultPreview(_ resultText: String) {
+        guard aiInputCommandState.isPending,
+              activeAIInputSelection == nil,
+              let lastClient,
+              !resultText.isEmpty else {
+            return
+        }
+        let markedText = NSMutableAttributedString(string: resultText)
+        markedText.addAttribute(
+            .underlineStyle,
+            value: NSUnderlineStyle.single.rawValue,
+            range: NSRange(location: 0, length: markedText.length)
+        )
+        lastClient.setMarkedText(
+            markedText,
+            selectionRange: NSRange(location: markedText.length, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+    }
+
+    // AI 结果先替换宿主 marked text，再关闭面板，避免触发等号残留或再次翻译。
     private func commitAIInputResult(resultText: String) {
         guard let lastClient, !resultText.isEmpty else {
             NSLog("TypingChao ignored AI input result without an active client")
@@ -1351,15 +1370,17 @@ final class TypingChaoInputController: IMKInputController {
             }
             return selectionContext.replacementRange
         } ?? NSRange(location: NSNotFound, length: 0)
-        closeAIInput()
         lastClient.insertText(
             resultText,
             replacementRange: replacementRange
         )
+        aiInputCommandState.reset()
+        closeAIInput()
     }
 
-    // 关闭 AI 面板时统一取消异步请求，避免旧结果回写新会话。
+    // 关闭 AI 面板时恢复未完成的等号输入，并取消异步请求，避免旧结果回写新会话。
     private func closeAIInput() {
+        discardPendingAIInputCommand(client: lastClient)
         isPresentingAIInput = false
         aiInputRequestGeneration += 1
         aiInputTask?.cancel()
@@ -1649,7 +1670,7 @@ final class TypingChaoInputController: IMKInputController {
         candidateOverlay.showAIInputTrigger(anchor: anchor)
     }
 
-    // AI 候选确认、取消或输入其它按键时先提交可见等号，再清理候选状态。
+    // AI 候选取消或输入其它按键时先提交可见等号，再清理候选状态。
     private func discardPendingAIInputCommand(client: IMKTextInput?) {
         if aiInputCommandState.isPending,
            let client {

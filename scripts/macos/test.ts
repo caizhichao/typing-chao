@@ -25,6 +25,8 @@ const smokeDirectory = join(testDataRoot, "rime");
 const outputPath = join(testBinaryRoot, "RimeSmoke");
 
 run("bun", ["run", "scripts/macos/build.ts"]);
+run("bunx", ["tsc", "--project", "platforms/macos/WebUI/tsconfig.json", "--noEmit"]);
+verifyWebUIContract();
 verifyCommercialRimeDataContract();
 verifyStableDevelopmentCodeRequirement();
 verifyBundledTranslationEndpoint();
@@ -176,6 +178,7 @@ run("swiftc", [
   sdkPath,
   join(sourceRoot, "RimeSnapshot.swift"),
   join(sourceRoot, "OverlayLayout.swift"),
+  join(sourceRoot, "TypingChaoWebView.swift"),
   join(sourceRoot, "CandidateOverlay.swift"),
   join(testRoot, "CandidateBarLayoutSmoke.swift"),
   "-framework",
@@ -184,6 +187,8 @@ run("swiftc", [
   "InputMethodKit",
   "-framework",
   "Carbon",
+  "-framework",
+  "WebKit",
   "-o",
   candidateBarLayoutSmokeOutputPath,
 ]);
@@ -261,6 +266,7 @@ run("swiftc", [
   join(sourceRoot, "OverlayLayout.swift"),
   join(sourceRoot, "InputMethodSettings.swift"),
   join(sourceRoot, "TranslationService.swift"),
+  join(sourceRoot, "TypingChaoWebView.swift"),
   join(sourceRoot, "AIInputOverlay.swift"),
   join(testRoot, "AIInputOverlaySmoke.swift"),
   "-framework",
@@ -269,6 +275,8 @@ run("swiftc", [
   "InputMethodKit",
   "-framework",
   "Carbon",
+  "-framework",
+  "WebKit",
   "-o",
   aiInputOverlaySmokeOutputPath,
 ]);
@@ -756,6 +764,94 @@ function swiftMethodBody(source: string, signature: string) {
   throw new Error(`方法体未闭合：${signature}`);
 }
 
+// React/Tailwind 只能构建包内静态页面，并通过系统 WebKit 的单一白名单桥接访问原生能力。
+function verifyWebUIContract() {
+  const webUIRoot = join(macOSRoot, "WebUI");
+  const bundledWebUIRoot = join(
+    buildRoot,
+    "TypingChao.app",
+    "Contents",
+    "Resources",
+    "WebUI",
+  );
+  const bundledAssetRoot = join(bundledWebUIRoot, "assets");
+  const packageMetadata = JSON.parse(
+    readFileSync(join(projectRoot, "package.json"), "utf8"),
+  ) as {
+    scripts?: Record<string, string>;
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
+  const buildSource = readFileSync(join(projectRoot, "scripts", "macos", "build.ts"), "utf8");
+  const webViewSource = readFileSync(join(sourceRoot, "TypingChaoWebView.swift"), "utf8");
+  const candidateWebSource = readFileSync(join(webUIRoot, "src", "CandidateApp.tsx"), "utf8");
+  const settingsWebSource = readFileSync(join(webUIRoot, "src", "SettingsApp.tsx"), "utf8");
+  const aiInputWebSource = readFileSync(join(webUIRoot, "src", "AIInputApp.tsx"), "utf8");
+  const bundledIndexSource = readFileSync(join(bundledWebUIRoot, "index.html"), "utf8");
+  const bundledAssetNameList = existsSync(bundledAssetRoot)
+    ? readdirSync(bundledAssetRoot)
+    : [];
+
+  if (
+    packageMetadata.scripts?.["build:web-ui"] !== "bun run scripts/macos/build-web-ui.ts" ||
+    packageMetadata.dependencies?.react == null ||
+    packageMetadata.dependencies?.["react-dom"] == null ||
+    packageMetadata.devDependencies?.tailwindcss == null ||
+    packageMetadata.devDependencies?.vite == null
+  ) {
+    throw new Error("React/Tailwind Web UI 依赖和统一构建入口没有完整锁定");
+  }
+  if (
+    !existsSync(join(bundledWebUIRoot, "index.html")) ||
+    !bundledAssetNameList.some((fileName) => fileName.endsWith(".js")) ||
+    !bundledAssetNameList.some((fileName) => fileName.endsWith(".css"))
+  ) {
+    throw new Error("macOS 输入法包缺少 React/Tailwind 静态资源");
+  }
+  if (
+    /<script\b[^>]*\bsrc=/.test(bundledIndexSource) ||
+    /<link\b[^>]*\bhref="[^"]+\.css"/.test(bundledIndexSource) ||
+    bundledIndexSource.indexOf('<div id="root"></div>') >= bundledIndexSource.lastIndexOf("<script>")
+  ) {
+    throw new Error("WKWebView 页面必须内联 Web UI 资源，并在 root 节点之后执行 React 脚本");
+  }
+  if (
+    !existsSync(join(
+      buildRoot,
+      "TypingChao.app",
+      "Contents",
+      "Resources",
+      "ThirdPartyLicenses",
+      "WebUI.txt",
+    )) ||
+    !buildSource.includes('run("bun", ["run", "build:web-ui"]') ||
+    !buildSource.includes('"-framework", "WebKit"') ||
+    !buildSource.includes('join(sourceRoot, "TypingChaoWebView.swift")')
+  ) {
+    throw new Error("Web UI 构建、WebKit 链接或第三方许可证没有进入正式包");
+  }
+  for (const requiredBridgeToken of [
+    "WKScriptMessageHandler",
+    "loadFileURL",
+    "requestURL.isFileURL",
+    "markPageReady",
+    "JSONSerialization.isValidJSONObject",
+  ]) {
+    if (!webViewSource.includes(requiredBridgeToken)) {
+      throw new Error("Web UI 原生桥接缺少本地资源或消息边界：" + requiredBridgeToken);
+    }
+  }
+  if (
+    !candidateWebSource.includes("candidateAction") ||
+    !settingsWebSource.includes("sendNativeMessage") ||
+    !settingsWebSource.includes("翻译与 AI") ||
+    !aiInputWebSource.includes("sendNativeMessage") ||
+    !aiInputWebSource.includes("AI 输入")
+  ) {
+    throw new Error("候选条、设置页和 AI 问答页必须都由 React 页面承载");
+  }
+}
+
 // 商业构建只能包含项目自有和已核实宽松许可证的 Rime 数据，禁止旧 LGPL 词典重新混入。
 function verifyCommercialRimeDataContract() {
   const rimeDataDirectory = join(buildRoot, "TypingChao.app", "Contents", "Resources", "RimeData");
@@ -816,6 +912,10 @@ function verifyStableDevelopmentCodeRequirement() {
 // 翻译客户端必须使用已确认的 DeepSeek 官方 HTTPS 或本机 Codex Responses 端点。
 function verifyBundledTranslationEndpoint() {
   const bundleInfoPath = join(buildRoot, "TypingChao.app", "Contents", "Info.plist");
+  const settingsSource = readFileSync(
+    join(sourceRoot, "InputMethodSettings.swift"),
+    "utf8",
+  );
   const translationServiceSource = readFileSync(
     join(sourceRoot, "TranslationService.swift"),
     "utf8",
@@ -828,10 +928,11 @@ function verifyBundledTranslationEndpoint() {
     "com.caizhichao.typingchao.inputmethod.TypingChao.Pinyin"
   ];
   if (
-    !translationServiceSource.includes('https://api.deepseek.com/chat/completions') ||
-    (!translationServiceSource.includes('http://127.0.0.1:8317/v1/responses') ||
-      (translationServiceSource.includes("http://") &&
-        !translationServiceSource.includes('http://127.0.0.1:8317/v1/responses'))) ||
+    !settingsSource.includes('https://api.deepseek.com') ||
+    !settingsSource.includes('http://127.0.0.1:8317/v1') ||
+    !settingsSource.includes('return ["chat", "completions"]') ||
+    !settingsSource.includes('return ["responses"]') ||
+    !translationServiceSource.includes("inputMethodSettings.requestURL(for: serviceProvider)") ||
     translationServiceSource.includes("proxyAccessToken") ||
     bundledInfo.NSAccessibilityUsageDescription !== undefined ||
     bundledInfo.CFBundleIconFile !== appIconBundleName ||
@@ -843,7 +944,7 @@ function verifyBundledTranslationEndpoint() {
     !existsSync(join(buildRoot, "TypingChao.app", "Contents", "Resources", appIconBundleName)) ||
     !existsSync(join(buildRoot, "TypingChao.app", "Contents", "Resources", menuIconFileName))
   ) {
-    throw new Error("输入法包必须使用 DeepSeek 官方 HTTPS 与本机 Codex Responses 端点，并保持注册页和菜单模式图标分离");
+    throw new Error("输入法包必须保留 DeepSeek/Codex 默认 Base URL 和固定协议路径，并保持注册页和菜单模式图标分离");
   }
 }
 
@@ -861,10 +962,14 @@ function verifyTranslationPromptContract() {
   }
 }
 
-// 候选条必须保留独立 AI 与设置按钮，点击后均由统一 InputMethodKit 生命周期处理。
+// 候选条必须由 React 统一绘制，尾部只保留设置入口，AI 继续由等号候选和输入法菜单进入。
 function verifyCandidateSettingsContract() {
   const candidateSource = readFileSync(
     join(sourceRoot, "CandidateOverlay.swift"),
+    "utf8",
+  );
+  const candidateWebSource = readFileSync(
+    join(macOSRoot, "WebUI", "src", "CandidateApp.tsx"),
     "utf8",
   );
   const mainSource = readFileSync(
@@ -873,6 +978,14 @@ function verifyCandidateSettingsContract() {
   );
   const settingsSource = readFileSync(
     join(sourceRoot, "InputMethodSettingsWindow.swift"),
+    "utf8",
+  );
+  const settingsWebSource = readFileSync(
+    join(macOSRoot, "WebUI", "src", "SettingsApp.tsx"),
+    "utf8",
+  );
+  const webStyleSource = readFileSync(
+    join(macOSRoot, "WebUI", "src", "styles.css"),
     "utf8",
   );
   const inputModeStatusSource = readFileSync(
@@ -901,53 +1014,45 @@ function verifyCandidateSettingsContract() {
     throw new Error("AI 候选条必须优先使用本次等号输入前捕获的锚点");
   }
 
-  if (
-    !candidateSource.includes("CandidateAIInputButton") ||
-    !candidateSource.includes("setAIInputHandler") ||
-    !candidateSource.includes("CandidateSettingsButton") ||
-    !candidateSource.includes('systemSymbolName: "gearshape"') ||
-    !candidateSource.includes("aiInputButtonRect") ||
-    !candidateSource.includes("打开 AI 输入") ||
-    candidateSource.includes('NSString(string: "⌄")') ||
-    candidateSource.includes('NSString(string: "⚙︎")')
-  ) {
-    throw new Error("候选条尾部必须保留独立的 AI 与设置按钮");
-  }
   if (!mainSource.includes("TypingChaoApplicationDelegate.shared")) {
     throw new Error("输入法进程必须由统一 AppKit delegate 管理设置窗口生命周期");
   }
   if (
-    !settingsSource.includes("拼音方案") ||
-    !settingsSource.includes("schemaPopUpButton") ||
     !settingsSource.includes("schemaHandler") ||
-    !settingsSource.includes("字符宽度") ||
-    !settingsSource.includes("标点样式") ||
-    !settingsSource.includes("Shift + Space")
+    !settingsWebSource.includes("拼音方案") ||
+    !settingsWebSource.includes("字符宽度") ||
+    !settingsWebSource.includes("标点样式") ||
+    !settingsWebSource.includes("Shift") ||
+    !settingsWebSource.includes("Space")
   ) {
     throw new Error("设置页必须把半/全角、标点样式和快捷切换分开说明");
   }
   if (
-    !settingsSource.includes("通用 AI 输入法") ||
+    !settingsWebSource.includes("通用 AI 输入法") ||
     !settingsSource.includes("CFBundleShortVersionString") ||
     !settingsSource.includes("CFBundleVersion")
   ) {
     throw new Error("设置侧栏必须显示产品能力和当前安装包版本");
   }
-  const appearanceRefreshCount = settingsSource.split("override func viewDidChangeEffectiveAppearance()").length - 1;
-  const appearanceResolutionCount = settingsSource.split("performAsCurrentDrawingAppearance").length - 1;
   if (
-    !settingsSource.includes("let rootView = SettingsRootView()") ||
-    !settingsSource.includes("label.textColor = .labelColor") ||
-    appearanceRefreshCount < 3 ||
-    appearanceResolutionCount < 3
+    !webStyleSource.includes("@media (prefers-color-scheme: dark)") ||
+    !webStyleSource.includes("--window-bg") ||
+    !webStyleSource.includes("--surface") ||
+    !webStyleSource.includes("--text-primary")
   ) {
-    throw new Error("设置页背景、卡片和侧栏必须与原生控件使用同一套动态明暗外观");
+    throw new Error("React 设置页必须使用统一 token 适配系统明暗外观");
   }
   if (
-    !candidateSource.includes("CandidateBarTrailingLayout") ||
-    !candidateSource.includes("drawTrailingSeparator()")
+    !candidateSource.includes("TypingChaoWebView(webViewName: .candidate") ||
+    !candidateSource.includes('messageType: "candidateState"') ||
+    !candidateSource.includes('messageType == "candidateAction"') ||
+    candidateSource.includes("setAIInputHandler") ||
+    candidateSource.includes("CandidateAIInputButton") ||
+    !candidateWebSource.includes("candidate-settings-button") ||
+    !candidateWebSource.includes("changePage") ||
+    !candidateWebSource.includes("selectCandidate")
   ) {
-    throw new Error("候选条分页、AI 与设置区必须使用独立布局和可见分隔");
+    throw new Error("候选条必须由 React 负责候选、分页和设置入口，并移除尾部 AI 图标");
   }
   if (
     !settingsSource.includes("window?.level = .normal") ||
@@ -1000,8 +1105,21 @@ function verifyAIInputContract() {
     join(sourceRoot, "TranslationService.swift"),
     "utf8",
   );
+  const aiInputWebSource = readFileSync(
+    join(macOSRoot, "WebUI", "src", "AIInputApp.tsx"),
+    "utf8",
+  );
+  const settingsWebSource = readFileSync(
+    join(macOSRoot, "WebUI", "src", "SettingsApp.tsx"),
+    "utf8",
+  );
+  const showAIInputBody = swiftMethodBody(controllerSource, "private func showAIInput(");
+  const presentAIInputBody = swiftMethodBody(controllerSource, "private func presentAIInput(");
+  const requestAIInputBody = swiftMethodBody(controllerSource, "private func requestAIInput(");
+  const markedResultPreviewBody = swiftMethodBody(controllerSource, "private func updateAIInputMarkedResultPreview(");
+  const commitAIInputResultBody = swiftMethodBody(controllerSource, "private func commitAIInputResult(");
+  const closeAIInputBody = swiftMethodBody(controllerSource, "private func closeAIInput()");
   for (const requiredContract of [
-    "setAIInputHandler",
     "AIInputSelectionContext",
     "prefilledPromptText:",
     "activeAIInputSelection",
@@ -1048,15 +1166,14 @@ function verifyAIInputContract() {
     }
   }
   if (
-    !candidateSource.includes("CandidateAIInputButton") ||
-    !candidateSource.includes("openAIInput") ||
-    !candidateSource.includes("aiInputButtonRect") ||
+    !candidateSource.includes("showAIInputTrigger") ||
     !candidateSource.includes('labelText: "1"') ||
-    !candidateSource.includes("打开 AI 输入") ||
+    !candidateSource.includes("isAIInputTriggerVisible") ||
+    candidateSource.includes("CandidateAIInputButton") ||
     !menuSource.includes('title: "AI 输入…"') ||
     !menuSource.includes('keyEquivalent: ""')
   ) {
-    throw new Error("候选条和输入法菜单必须提供明确、无快捷键依赖的 AI 入口");
+    throw new Error("AI 输入必须保留等号候选和输入法菜单入口，候选尾部不得重复显示 AI 图标");
   }
   if (
     !commandSource.includes('static let triggerText = "="') ||
@@ -1065,6 +1182,25 @@ function verifyAIInputContract() {
     !commandSource.includes("mutating func reset")
   ) {
     throw new Error("AI 快速命令只能由单个普通等号触发");
+  }
+  const resultPreviewIndex = requestAIInputBody.indexOf("updateAIInputMarkedResultPreview(resultText)");
+  const resultInsertIndex = commitAIInputResultBody.indexOf("lastClient.insertText(");
+  const resultResetIndex = commitAIInputResultBody.indexOf("aiInputCommandState.reset()", resultInsertIndex);
+  const resultCloseIndex = commitAIInputResultBody.indexOf("closeAIInput()", resultResetIndex);
+  if (
+    showAIInputBody.includes("discardPendingAIInputCommand") ||
+    !presentAIInputBody.includes("if !aiInputCommandState.isPending") ||
+    resultPreviewIndex < 0 ||
+    !markedResultPreviewBody.includes("aiInputCommandState.isPending") ||
+    !markedResultPreviewBody.includes("activeAIInputSelection == nil") ||
+    !markedResultPreviewBody.includes("lastClient.setMarkedText(") ||
+    !markedResultPreviewBody.includes("replacementRange: NSRange(location: NSNotFound, length: 0)") ||
+    resultInsertIndex < 0 ||
+    resultResetIndex <= resultInsertIndex ||
+    resultCloseIndex <= resultResetIndex ||
+    !closeAIInputBody.includes("discardPendingAIInputCommand(client: lastClient)")
+  ) {
+    throw new Error("AI 快速入口必须保留 marked 区域并同步结果预览，正式确认时才原位上屏");
   }
   for (const removedCommandToken of [
     "commitMarkedText",
@@ -1096,31 +1232,37 @@ function verifyAIInputContract() {
     !overlaySource.includes("panel.center()") ||
     !overlaySource.includes("panel.makeKeyAndOrderFront(nil)") ||
     !overlaySource.includes("override var canBecomeKey") ||
-    !overlaySource.includes("final class AIInputPromptView") ||
+    !overlaySource.includes("final class AIInputKeyCaptureView") ||
     !overlaySource.includes("acceptsFirstResponder") ||
+    !overlaySource.includes("TypingChaoWebView(webViewName: .aiInput, acceptsKeyboardFocus: false)") ||
     !overlaySource.includes("func focusPromptInput()") ||
     !overlaySource.includes("func setKeyHandler(_ handler: @escaping (NSEvent) -> Bool)") ||
-    !overlaySource.includes("连续对话 · 当前会话保留上下文") ||
     !overlaySource.includes("pendingPromptText") ||
     !overlaySource.includes("conversationMessageList") ||
     !overlaySource.includes("panelSize = NSSize(width: 520, height: 500)") ||
-    !overlaySource.includes("chatContainer.heightAnchor.constraint(equalToConstant: 380)") ||
-    !overlaySource.includes("scrollChatToVisibleContent") ||
-    !overlaySource.includes("usedHeight > visibleHeight + 1") ||
     !overlaySource.includes("func commitResult()") ||
-    !overlaySource.includes("serviceProviderPopUpButton") ||
     !overlaySource.includes("setServiceProviderHandler") ||
+    !overlaySource.includes('messageType: "aiInputState"') ||
+    !aiInputWebSource.includes("连续对话 · 当前会话保留上下文") ||
+    !aiInputWebSource.includes("conversationMessageList.map") ||
+    !aiInputWebSource.includes("promptComposition") ||
+    !aiInputWebSource.includes("provider-menu") ||
+    !aiInputWebSource.includes("上屏并退出") ||
     !translationServiceSource.includes("requestAIConversationResponse") ||
     !translationServiceSource.includes("ResponsesConversationRequest") ||
     !translationServiceSource.includes("inputMessageList")
   ) {
-    throw new Error("AI 输入必须保留当前会话上下文，并且把焦点交给面板内输入视图");
+    throw new Error("AI 输入必须保留当前会话上下文，并由 React 页面显示、原生 IMK 入口接管键盘");
   }
   for (const removedHintText of [
     "Enter 重试 · Esc 关闭",
     "Enter 发送 · ⌘Enter 上屏 · Esc 关闭",
     'NSButton(title: "关闭"',
     'NSButton(title: "发送"',
+    'NSButton(title: "上屏结果"',
+    "commitButton",
+    "commitAIInput",
+    "configureActionButton",
   ]) {
     if (overlaySource.includes(removedHintText)) {
       throw new Error("AI 输入面板不应显示快捷键提示文案：" + removedHintText);
@@ -1130,8 +1272,14 @@ function verifyAIInputContract() {
     "AIServiceProvider",
     "codexResponses",
     "TypingChaoAIServiceProvider",
-    "http://127.0.0.1:8317/v1/responses",
+    "TypingChaoDeepSeekBaseURL",
+    "TypingChaoCodexBaseURL",
+    "TypingChaoDeepSeekModelName",
+    "TypingChaoCodexModelName",
+    "http://127.0.0.1:8317/v1",
     "ResponsesRequest",
+    'ResponsesTool(typeName: "web_search")',
+    'case toolList = "tools"',
     "outputItemList",
   ]) {
     if (
@@ -1141,12 +1289,29 @@ function verifyAIInputContract() {
       throw new Error("AI 服务切换缺少 Responses 契约：" + requiredServiceToken);
     }
   }
+  for (const requiredSearchPrompt of [
+    "当前请求已提供 web_search 工具",
+    "必须先实际调用 web_search",
+    "即使模型记忆中已有答案也不能跳过搜索",
+    "不得声称没有搜索工具",
+  ]) {
+    if (!translationServiceSource.includes(requiredSearchPrompt)) {
+      throw new Error("Codex AI 默认提示词必须强制实时信息任务实际联网：" + requiredSearchPrompt);
+    }
+  }
   if (
     !translationServiceSource.includes("Key 无法使用") ||
     !translationServiceSource.includes("Key 错误或无权限") ||
-    !settingsWindowSource.includes('"输入 \\(serviceProvider.apiKeyDisplayName)"')
+    !settingsWindowSource.includes('"apiKeyConfigured"') ||
+    !settingsWindowSource.includes('"defaultBaseURL"') ||
+    !settingsWindowSource.includes("fetchAIModelList") ||
+    !settingsWindowSource.includes('messageType: "settingsModelList"') ||
+    !settingsWebSource.includes('type="password"') ||
+    !settingsWebSource.includes("modelNameList") ||
+    !translationServiceSource.includes("fetchModelNameList") ||
+    !settingsSource.includes("modelListURL(for serviceProvider: AIServiceProvider)")
   ) {
-    throw new Error("AI Key 错误提示必须区分当前服务和 Key 状态");
+    throw new Error("AI 服务切换必须同步 Key/Base URL/模型状态，并支持拉取模型列表");
   }
   if (
     !controllerSource.includes("private func aiInputLiteralText(for event: NSEvent, keyName: String)") ||
@@ -1168,24 +1333,39 @@ function verifyAIInputContract() {
   }
 }
 
-// API Key 只能通过设置窗口写入本机偏好，必须保留安全输入并支持设置窗口内粘贴长 Key。
+// API Key 只能由用户在设置 WebView 中输入或主动粘贴，初始化状态不得把已保存明文送入页面。
 function verifyAPIKeyPasteContract() {
   const settingsWindowSource = readFileSync(
     join(sourceRoot, "InputMethodSettingsWindow.swift"),
     "utf8",
   );
+  const settingsWebSource = readFileSync(
+    join(macOSRoot, "WebUI", "src", "SettingsApp.tsx"),
+    "utf8",
+  );
+  const settingsStateBody = swiftMethodBody(settingsWindowSource, "private func sendSettingsState()");
   for (const requiredToken of [
-    "PasteableSecureTextField: NSSecureTextField",
-    'private let pasteAPIKeyButton = NSButton(title: "粘贴"',
-    "override func performKeyEquivalent(with event: NSEvent)",
-    "func paste(_ sender: Any?)",
-    "NSPasteboard.general.string(forType: .string)",
-    "fieldEditor.insertText(normalizedText, replacementRange:",
-    "apiKeyField.paste(nil)",
+    'TypingChaoWebView(webViewName: .settings, acceptsKeyboardFocus: true)',
+    'case "pasteAPIKey"',
+    'NSPasteboard.general.string(forType: .string)',
+    'messageType: "settingsPastedAPIKey"',
+    '"apiKeyConfigured"',
   ]) {
     if (!settingsWindowSource.includes(requiredToken)) {
-      throw new Error("设置页 API Key 必须保留安全输入并支持 Command-V/按钮粘贴：" + requiredToken);
+      throw new Error("设置页 API Key 必须保留安全输入和用户主动粘贴入口：" + requiredToken);
     }
+  }
+  for (const requiredToken of [
+    'type="password"',
+    'sendSetting("pasteAPIKey", "")',
+    'settingsPastedAPIKey',
+  ]) {
+    if (!settingsWebSource.includes(requiredToken)) {
+      throw new Error("React 设置页必须保留密码输入和显式粘贴入口：" + requiredToken);
+    }
+  }
+  if (settingsStateBody.includes("currentAPIKey")) {
+    throw new Error("设置页初始化状态不得向 React 页面发送已保存 API Key 明文");
   }
 }
 

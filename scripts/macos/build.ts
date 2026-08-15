@@ -9,6 +9,7 @@ const projectRoot = resolve(import.meta.dir, "../..");
 const macOSRoot = join(projectRoot, "platforms", "macos");
 const sourceRoot = join(macOSRoot, "Sources", "TypingChaoInputMethod");
 const sourceResourcesRoot = join(macOSRoot, "Resources");
+const webUIBuildRoot = join(macOSRoot, "build", "web-ui");
 const macOSRimeDataRoot = join(sourceResourcesRoot, "RimeData");
 const sharedRimeDataRoot = join(projectRoot, "shared", "RimeData");
 const sourceInfoPath = join(macOSRoot, "Info.plist");
@@ -36,6 +37,8 @@ if (process.argv.includes("--release")) {
 }
 
 rmSync(buildRoot, { recursive: true, force: true });
+// 兼容 SDK 的系统头可能由本机安全软件按进程重新映射；每次构建都从干净模块缓存开始避免复用旧 PCM。
+rmSync(swiftModuleCacheRoot, { recursive: true, force: true });
 mkdirSync(join(buildRoot, "obj"), { recursive: true });
 mkdirSync(swiftModuleCacheRoot, { recursive: true });
 mkdirSync(join(contentsRoot, "MacOS"), { recursive: true });
@@ -49,6 +52,7 @@ if (!existsSync(librimeLibrary)) {
 
 run("bun", ["run", "scripts/rime/generate-aosp-pinyin-dictionary.ts"], projectRoot);
 run("bun", ["run", "scripts/rime/generate-wubi86-dictionary.ts"], projectRoot);
+run("bun", ["run", "build:web-ui"], projectRoot);
 copyRimeData();
 
 const bridgeObject = join(buildRoot, "obj", "RimeBridge.o");
@@ -69,6 +73,7 @@ const swiftFiles = [
   join(sourceRoot, "AIInputCommand.swift"),
   join(sourceRoot, "AIInputSelection.swift"),
   join(sourceRoot, "InputMethodSettings.swift"),
+  join(sourceRoot, "TypingChaoWebView.swift"),
   join(sourceRoot, "InputMethodSettingsWindow.swift"),
   join(sourceRoot, "InputMethodApplicationDelegate.swift"),
   join(sourceRoot, "InputMethodMenu.swift"),
@@ -111,6 +116,7 @@ const linkArguments = [
   "-framework", "AppKit",
   "-framework", "Carbon",
   "-framework", "InputMethodKit",
+  "-framework", "WebKit",
   "-o", executablePath,
 ];
 run("swiftc", linkArguments);
@@ -132,6 +138,8 @@ function copyRimeData() {
   cpSync(join(sourceResourcesRoot, "TypingChaoAppIcon.pdf"), join(resourcesRoot, "TypingChaoAppIcon.pdf"));
   cpSync(join(sourceResourcesRoot, "TypingChaoAppIcon.icns"), join(resourcesRoot, "TypingChaoAppIcon.icns"));
   cpSync(join(sourceResourcesRoot, "TypingChaoMenuIconV4.pdf"), join(resourcesRoot, "TypingChaoMenuIconV4.pdf"));
+  cpSync(webUIBuildRoot, join(resourcesRoot, "WebUI"), { recursive: true });
+  cpSync(join(sourceResourcesRoot, "ThirdPartyLicenses"), join(resourcesRoot, "ThirdPartyLicenses"), { recursive: true });
   for (const localizationName of ["en.lproj", "zh-Hans.lproj", "zh_CN.lproj"]) {
     cpSync(join(sourceResourcesRoot, localizationName), join(resourcesRoot, localizationName), { recursive: true });
   }
