@@ -50,6 +50,22 @@ void initializeRime(const std::string& sharedDataDirectory,
                            !std::filesystem::exists(sharedVersionPath) ||
                            readText(sharedVersionPath) != readText(userVersionPath);
   if (needsDeploy) {
+    // 数据升级时只覆盖项目随包分发的配置，让 Rime 用新版 schema 重建缓存，同时保留用户词频和 custom patch。
+    for (const auto& sharedEntry : std::filesystem::directory_iterator(sharedDataPath)) {
+      if (!sharedEntry.is_regular_file()) {
+        continue;
+      }
+      const auto sourcePath = sharedEntry.path();
+      const auto fileName = sourcePath.filename();
+      const bool isSchemaConfig = sourcePath.extension() == ".yaml" &&
+          sourcePath.stem().extension() == ".schema";
+      if (fileName != "default.yaml" && !isSchemaConfig) {
+        continue;
+      }
+      std::filesystem::copy_file(
+          sourcePath, userDataPath / fileName,
+          std::filesystem::copy_options::overwrite_existing);
+    }
     g_rime->deployer_initialize(&traits);
     if (!g_rime->deploy_config_file("default.yaml", "config_version") ||
         !g_rime->prebuild()) {

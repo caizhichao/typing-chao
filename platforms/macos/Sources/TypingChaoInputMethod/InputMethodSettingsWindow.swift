@@ -234,6 +234,15 @@ private final class InputMethodSettingsViewController: NSViewController {
             sendSettingsState()
         case "fetchModelList":
             fetchAIModelList()
+        case "saveAIInputSystemPrompt":
+            guard let systemPrompt = fieldValue as? String else { return }
+            InputMethodSettings.shared.setAIInputSystemPrompt(systemPrompt)
+            sendSettingsState()
+            sendActionResult(actionName: actionName, isSuccess: true, messageText: "AI 运行场景提示词已保存")
+        case "resetAIInputSystemPrompt":
+            InputMethodSettings.shared.resetAIInputSystemPrompt()
+            sendSettingsState()
+            sendActionResult(actionName: actionName, isSuccess: true, messageText: "已恢复默认 AI 运行场景提示词")
         case "setSchema":
             guard let schemaIdentifier = fieldValue as? String else { return }
             selectedSchemaIdentifier = schemaIdentifier
@@ -355,6 +364,7 @@ private final class InputMethodSettingsViewController: NSViewController {
                 "customBaseURL": settings.customBaseURL(for: serviceProvider)?.absoluteString ?? "",
                 "modelName": settings.modelName(for: serviceProvider),
                 "modelNameList": displayedModelNameList,
+                "aiInputSystemPrompt": settings.aiInputSystemPrompt,
                 "schemaIdentifier": selectedSchemaIdentifier,
                 "schemaList": currentSchemaList.map { schemaItem in
                     [

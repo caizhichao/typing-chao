@@ -26,6 +26,7 @@ const resultText = await streamAIInputResponse(
     baseURL: "http://127.0.0.1:8317/v1",
     modelName: "gpt-5.6-luna",
     apiKey: localAPIKey,
+    systemPromptText: "你是输入法 AI 助手，只输出最终结果。",
   },
   "上一条回复中的暗号是什么？只输出暗号。",
   conversationMessageList,

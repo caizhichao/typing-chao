@@ -10,6 +10,30 @@ int main(int argc, const char* argv[]) {
 
     NSString* sharedDataDirectory = [NSString stringWithUTF8String:argv[1]];
     NSString* userDataDirectory = [NSString stringWithUTF8String:argv[2]];
+    // 旧版本用户目录已有 schema 时，数据版本升级也必须覆盖项目配置，而非继续复用旧标点表。
+    NSError* setupError = nil;
+    [[NSFileManager defaultManager] createDirectoryAtPath:userDataDirectory
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:&setupError];
+    NSString* sharedSchemaPath = [sharedDataDirectory stringByAppendingPathComponent:@"typing_pinyin.schema.yaml"];
+    NSString* userSchemaPath = [userDataDirectory stringByAppendingPathComponent:@"typing_pinyin.schema.yaml"];
+    NSString* sharedSchemaText = [NSString stringWithContentsOfFile:sharedSchemaPath
+                                                            encoding:NSUTF8StringEncoding
+                                                               error:&setupError];
+    NSString* staleSchemaText = [sharedSchemaText stringByReplacingOccurrencesOfString:@"\"^\": \"^\""
+                                                                        withString:@"\"^\": \"……\""];
+    if (setupError || !sharedSchemaText || [staleSchemaText isEqualToString:sharedSchemaText] ||
+        ![staleSchemaText writeToFile:userSchemaPath
+                            atomically:YES
+                              encoding:NSUTF8StringEncoding
+                                 error:&setupError] ||
+        ![@"legacy\n" writeToFile:[userDataDirectory stringByAppendingPathComponent:@"rime-data-version.txt"]
+                          atomically:YES
+                            encoding:NSUTF8StringEncoding
+                               error:&setupError]) {
+      return 40;
+    }
     TDNRimeSession* session = [[TDNRimeSession alloc]
         initWithSharedDataDirectory:sharedDataDirectory
                    userDataDirectory:userDataDirectory];
@@ -81,6 +105,21 @@ int main(int argc, const char* argv[]) {
         [directTextSnapshot[@"preedit"] length] != 0) {
       return 11;
     }
+
+    // Shift+6 已由 macOS 解析为 ^；半角输出 ^，全角输出其对应的全角指数符号 ＾，两种状态都不能转为省略号。
+    [session setOption:@"full_shape" enabled:NO];
+    NSDictionary<NSString*, id>* halfShapeCaretSnapshot = [session processKey:@"^" modifiers:@[]];
+    if (![halfShapeCaretSnapshot[@"commitText"] isEqualToString:@"^"] ||
+        [halfShapeCaretSnapshot[@"preedit"] length] != 0) {
+      return 38;
+    }
+    [session setOption:@"full_shape" enabled:YES];
+    NSDictionary<NSString*, id>* fullShapeCaretSnapshot = [session processKey:@"^" modifiers:@[]];
+    if (![fullShapeCaretSnapshot[@"commitText"] isEqualToString:@"＾"] ||
+        [fullShapeCaretSnapshot[@"preedit"] length] != 0) {
+      return 39;
+    }
+    [session setOption:@"full_shape" enabled:NO];
 
     [session processKey:@"s" modifiers:@[]];
     [session processKey:@"h" modifiers:@[]];

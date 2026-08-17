@@ -61,7 +61,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -70,7 +71,8 @@ button {
 }
 
 input,
-select {
+select,
+textarea {
   user-select: text;
 }
 
@@ -261,6 +263,26 @@ select {
   display: flex;
   align-items: center;
   width: 100%;
+  gap: 6px;
+}
+
+.prompt-settings-card {
+  padding: 14px;
+}
+
+.prompt-textarea {
+  display: block;
+  height: 240px;
+  min-height: 96px;
+  padding: 8px 9px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.prompt-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
   gap: 6px;
 }
 

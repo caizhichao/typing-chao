@@ -321,6 +321,7 @@ private final class AIInputOverlayContentView: NSView {
                 "baseURL": InputMethodSettings.shared.baseURL(for: serviceProvider).absoluteString,
                 "modelName": InputMethodSettings.shared.modelName(for: serviceProvider),
                 "apiKey": InputMethodSettings.shared.apiKey(for: serviceProvider) ?? "",
+                "systemPromptText": InputMethodSettings.shared.aiInputSystemPrompt,
             ]
         )
     }

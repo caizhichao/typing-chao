@@ -22,6 +22,7 @@ interface SettingsState {
   customBaseURL: string;
   modelName: string;
   modelNameList: string[];
+  aiInputSystemPrompt: string;
   schemaIdentifier: string;
   schemaList: SelectOption[];
   inputModeIdentifier: string;
@@ -47,6 +48,7 @@ const emptySettingsState: SettingsState = {
   customBaseURL: "",
   modelName: "",
   modelNameList: [],
+  aiInputSystemPrompt: "",
   schemaIdentifier: "",
   schemaList: [],
   inputModeIdentifier: "chinese",
@@ -133,12 +135,13 @@ function SettingsRow({
 }
 
 export default function SettingsApp() {
-  const [activeSection, setActiveSection] = useState<"translation" | "input">(
+  const [activeSection, setActiveSection] = useState<"translation" | "ai-input" | "input">(
     "translation",
   );
   const [settingsState, setSettingsState] = useState(emptySettingsState);
   const [apiKeyText, setAPIKeyText] = useState("");
   const [baseURLText, setBaseURLText] = useState("");
+  const [aiInputSystemPromptText, setAIInputSystemPromptText] = useState("");
   const [isModelLoading, setIsModelLoading] = useState(false);
   const [actionResult, setActionResult] = useState<SettingsActionResult | null>(null);
 
@@ -157,6 +160,7 @@ export default function SettingsApp() {
         const nextState = nativeMessage.messageData as SettingsState;
         setSettingsState(nextState);
         setBaseURLText(nextState.customBaseURL);
+        setAIInputSystemPromptText(nextState.aiInputSystemPrompt);
         setAPIKeyText("");
         setIsModelLoading(false);
         return;
@@ -228,6 +232,14 @@ export default function SettingsApp() {
           >
             <span className="nav-icon">译</span>
             翻译与 AI
+          </button>
+          <button
+            className={activeSection === "ai-input" ? "nav-item nav-item-active" : "nav-item"}
+            type="button"
+            onClick={() => setActiveSection("ai-input")}
+          >
+            <span className="nav-icon">✦</span>
+            AI 问答
           </button>
           <button
             className={activeSection === "input" ? "nav-item nav-item-active" : "nav-item"}
@@ -385,6 +397,51 @@ export default function SettingsApp() {
                   </button>
                 </div>
               </SettingsRow>
+            </div>
+
+
+          </>
+        ) : activeSection === "ai-input" ? (
+          <>
+            <header className="page-header">
+              <div>
+                <h1>AI 问答</h1>
+                <p>管理 AI 输入时携带的运行场景和最终上屏口径。</p>
+              </div>
+              <span className="status-pill">
+                <span className="status-dot" /> 可直接上屏
+              </span>
+            </header>
+
+            <div className="settings-card prompt-settings-card">
+              <div className="text-[13px] font-semibold text-[var(--text-primary)]">
+                AI 运行场景提示词
+              </div>
+              <div className="mt-1 text-[11.5px] leading-[1.45] text-[var(--text-secondary)]">
+                每次 AI 输入都会附带这段上下文，默认说明结果会写入当前应用的输入框。可按自己的写作场景修改。
+              </div>
+              <textarea
+                className="form-control prompt-textarea mt-3"
+                value={aiInputSystemPromptText}
+                spellCheck={false}
+                onChange={(eventValue) => setAIInputSystemPromptText(eventValue.target.value)}
+              />
+              <div className="prompt-settings-actions">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => sendSetting("saveAIInputSystemPrompt", aiInputSystemPromptText)}
+                >
+                  保存提示词
+                </button>
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={() => sendSetting("resetAIInputSystemPrompt", "")}
+                >
+                  恢复默认
+                </button>
+              </div>
             </div>
 
             <div className="info-card mt-3">
