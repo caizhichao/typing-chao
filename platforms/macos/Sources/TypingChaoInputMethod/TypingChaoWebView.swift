@@ -27,11 +27,13 @@ private final class TypingChaoWebMessageHandler: NSObject, WKScriptMessageHandle
 // 复用系统 WebKit 加载包内静态资源；设置页允许原生文本焦点，AI 面板保留 IMK 键盘主链。
 final class TypingChaoWebView: WKWebView, WKNavigationDelegate {
     private static let messageHandlerName = "typingChao"
+    private static let sharedProcessPool = WKProcessPool()
 
     private let acceptsKeyboardFocus: Bool
     private let nativeMessageHandler: TypingChaoWebMessageHandler
     private var messageHandler: (([String: Any]) -> Void)?
-    private var isPageReady = false
+    private(set) var isPageReady = false
+    private var pageReadyHandler: (() -> Void)?
     private var pendingMessageList: [(messageType: String, messageData: Any)] = []
 
     init(webViewName: TypingChaoWebViewName, acceptsKeyboardFocus: Bool) {
@@ -48,6 +50,7 @@ final class TypingChaoWebView: WKWebView, WKNavigationDelegate {
         userContentController.add(nativeMessageHandler, name: Self.messageHandlerName)
 
         let configuration = WKWebViewConfiguration()
+        configuration.processPool = Self.sharedProcessPool
         configuration.userContentController = userContentController
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         super.init(frame: .zero, configuration: configuration)
@@ -86,6 +89,10 @@ final class TypingChaoWebView: WKWebView, WKNavigationDelegate {
         messageHandler = handler
     }
 
+    func setPageReadyHandler(_ handler: @escaping () -> Void) {
+        pageReadyHandler = handler
+    }
+
     // 页面主动确认 React 已挂载后再发送状态，避免初始化阶段的脚本调用丢失。
     func markPageReady() {
         isPageReady = true
@@ -97,6 +104,7 @@ final class TypingChaoWebView: WKWebView, WKNavigationDelegate {
                 messageData: queuedMessage.messageData
             )
         }
+        pageReadyHandler?()
     }
 
     // 静态页面必须来自 app Resources，加载失败时在页面内呈现可行动提示而不是空白浮层。

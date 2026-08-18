@@ -1134,6 +1134,8 @@ function verifyAIInputContract() {
     join(macOSRoot, "WebUI", "src", "SettingsApp.tsx"),
     "utf8",
   );
+  const activateServerBody = swiftMethodBody(controllerSource, "override func activateServer(");
+  const showAIInputEntryBody = swiftMethodBody(controllerSource, "func showAIInput()");
   const showAIInputBody = swiftMethodBody(controllerSource, "private func showAIInput(");
   const presentAIInputBody = swiftMethodBody(controllerSource, "private func presentAIInput(");
   const markedResultPreviewBody = swiftMethodBody(controllerSource, "private func updateAIInputMarkedResultPreview(");
@@ -1162,11 +1164,13 @@ function verifyAIInputContract() {
     'keyName == "1"',
     'keyName == "Return"',
     "showAIInput()",
+    "currentInputClient()",
+    "prepareClient(inputClient)",
     "setResultHandler",
     "commitAIInputResult(resultText:",
-    "aiInputOverlay.show(",
+    "ensureAIInputOverlay().show(",
     "activeAIInputController",
-    "aiInputOverlay.isVisible",
+    "overlayManager.isAIInputVisible",
     "isPresentingAIInput",
     "guard !isActiveAIInputController else",
     "handleAIInputKey(",
@@ -1191,13 +1195,26 @@ function verifyAIInputContract() {
     }
   }
   if (
+    !activateServerBody.includes("if isActiveAIInputController") ||
+    !showAIInputEntryBody.includes("currentInputClient()") ||
+    !showAIInputEntryBody.includes("prepareClient(inputClient)") ||
     !showAIInputBody.includes("guard !isSecureInputActive") ||
-    !presentAIInputBody.includes("aiInputOverlay.show(") ||
+    !presentAIInputBody.includes("ensureAIInputOverlay().show(") ||
     !markedResultPreviewBody.includes("setMarkedText") ||
     !commitAIInputResultBody.includes("insertText") ||
-    !closeAIInputBody.includes("aiInputOverlay.hide()")
+    !closeAIInputBody.includes("overlayManager.hideAIInputIfCreated()")
   ) {
     throw new Error("AI 输入必须保留安全输入、等号预览、宿主上屏和关闭收口");
+  }
+  for (const requiredOverlayLifecycleToken of [
+    "TypingChaoOverlayManager.shared",
+    "overlayManager.bind(",
+    "overlayManager.unbind(inputController: self)",
+    "private var aiInputOverlayStorage: AIInputOverlay?",
+  ]) {
+    if (!controllerSource.includes(requiredOverlayLifecycleToken)) {
+      throw new Error("macOS 浮层生命周期收敛契约缺失：" + requiredOverlayLifecycleToken);
+    }
   }
   if (
     !candidateSource.includes("showAIInputTrigger") ||
@@ -1225,6 +1242,8 @@ function verifyAIInputContract() {
     !overlaySource.includes('"apiKey": InputMethodSettings.shared.apiKey') ||
     !overlaySource.includes("func cancelRequest()") ||
     !overlaySource.includes("func setResultHandler") ||
+    !overlaySource.includes("panel.orderFrontRegardless()") ||
+    !overlaySource.includes("panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]") ||
     !overlaySource.includes("panelSize = NSSize(width: 520, height: 500)") ||
     overlaySource.includes("requestHandler") ||
     overlaySource.includes("showLoading()") ||

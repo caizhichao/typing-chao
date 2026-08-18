@@ -2,6 +2,111 @@ import AppKit
 import Carbon
 import InputMethodKit
 
+// 候选与 AI 浮层属于输入法进程级 UI；输入控制器只在激活时绑定当前会话动作，避免每个 IMK 会话重复创建 WebKit 页面。
+private final class TypingChaoOverlayManager {
+    static let shared = TypingChaoOverlayManager()
+
+    let candidateOverlay: CandidateOverlay
+    private var aiInputOverlayStorage: AIInputOverlay?
+    private weak var boundInputController: TypingChaoInputController?
+    private var candidateSelectionHandler: ((Int) -> Void)?
+    private var pageHandler: ((Bool) -> Void)?
+    private var settingsHandler: (() -> Void)?
+    private var commitHandler: ((String) -> Void)?
+    private var resultHandler: ((String) -> Void)?
+    private var serviceProviderHandler: ((AIServiceProvider) -> Void)?
+    private var keyHandler: ((NSEvent) -> Bool)?
+
+    private init() {
+        candidateOverlay = CandidateOverlay()
+        candidateOverlay.setCandidateSelectionHandler { [weak self] candidateIndex in
+            self?.candidateSelectionHandler?(candidateIndex)
+        }
+        candidateOverlay.setPageHandler { [weak self] pageBackward in
+            self?.pageHandler?(pageBackward)
+        }
+        candidateOverlay.setSettingsHandler { [weak self] in
+            self?.settingsHandler?()
+        }
+    }
+
+    var isAIInputVisible: Bool {
+        aiInputOverlayStorage?.isVisible ?? false
+    }
+
+    var isAIInputPresented: Bool {
+        aiInputOverlayStorage?.isPresented ?? false
+    }
+
+    func restoreAIInputPresentation() {
+        aiInputOverlayStorage?.restorePresentation()
+    }
+
+    func ensureAIInputOverlay() -> AIInputOverlay {
+        if let aiInputOverlayStorage {
+            return aiInputOverlayStorage
+        }
+        let aiInputOverlay = AIInputOverlay()
+        aiInputOverlay.setCommitHandler { [weak self] resultText in
+            self?.commitHandler?(resultText)
+        }
+        aiInputOverlay.setResultHandler { [weak self] resultText in
+            self?.resultHandler?(resultText)
+        }
+        aiInputOverlay.setServiceProviderHandler { [weak self] serviceProvider in
+            self?.serviceProviderHandler?(serviceProvider)
+        }
+        aiInputOverlay.setKeyHandler { [weak self] event in
+            self?.keyHandler?(event) ?? true
+        }
+        aiInputOverlayStorage = aiInputOverlay
+        return aiInputOverlay
+    }
+
+    // 只有当前输入控制器接管输入法会话时才允许它接收共享浮层动作，避免旧会话回写新会话。
+    func bind(
+        inputController: TypingChaoInputController,
+        candidateSelectionHandler: @escaping (Int) -> Void,
+        pageHandler: @escaping (Bool) -> Void,
+        settingsHandler: @escaping () -> Void,
+        commitHandler: @escaping (String) -> Void,
+        resultHandler: @escaping (String) -> Void,
+        serviceProviderHandler: @escaping (AIServiceProvider) -> Void,
+        keyHandler: @escaping (NSEvent) -> Bool
+    ) {
+        boundInputController = inputController
+        self.candidateSelectionHandler = candidateSelectionHandler
+        self.pageHandler = pageHandler
+        self.settingsHandler = settingsHandler
+        self.commitHandler = commitHandler
+        self.resultHandler = resultHandler
+        self.serviceProviderHandler = serviceProviderHandler
+        self.keyHandler = keyHandler
+    }
+
+    func unbind(inputController: TypingChaoInputController) {
+        guard boundInputController === inputController else {
+            return
+        }
+        boundInputController = nil
+        candidateSelectionHandler = nil
+        pageHandler = nil
+        settingsHandler = nil
+        commitHandler = nil
+        resultHandler = nil
+        serviceProviderHandler = nil
+        keyHandler = nil
+    }
+
+    func isBound(to inputController: TypingChaoInputController) -> Bool {
+        boundInputController === inputController
+    }
+
+    func hideAIInputIfCreated() {
+        aiInputOverlayStorage?.hide()
+    }
+}
+
 // 负责把 IMK 会话、完整 librime 快照、候选交互和输入法内部翻译草稿串在同一个输入会话里。
 final class TypingChaoInputController: IMKInputController {
     private static weak var activeOverlayController: TypingChaoInputController?
@@ -9,7 +114,10 @@ final class TypingChaoInputController: IMKInputController {
     private var rimeSession: TDNRimeSession?
     private let translationService = TranslationService()
     private let translationOverlay = TranslationOverlay()
-    private let candidateOverlay = CandidateOverlay()
+    private let overlayManager = TypingChaoOverlayManager.shared
+    private var candidateOverlay: CandidateOverlay {
+        overlayManager.candidateOverlay
+    }
     private let inputModeStatusOverlay = InputModeStatusOverlay()
     private var translationDraft = TranslationDraftState()
     private var translationTask: Task<Void, Never>?
@@ -21,12 +129,15 @@ final class TypingChaoInputController: IMKInputController {
     private var sessionClient: IMKTextInput?
     private var lastClient: IMKTextInput?
     private var inputMethodMenu: InputMethodMenu?
-    private let aiInputOverlay = AIInputOverlay()
     private var aiInputCommandState = AIInputCommandState()
     private var pendingAIInputSelection: AIInputSelectionContext?
     private var activeAIInputSelection: AIInputSelectionContext?
     private var isPresentingAIInput = false
     private var suppressNextHostReturnAfterAICommand = false
+
+    private func ensureAIInputOverlay() -> AIInputOverlay {
+        overlayManager.ensureAIInputOverlay()
+    }
 
     override init(server: IMKServer!, delegate: Any!, client inputClient: Any!) {
         super.init(server: server, delegate: delegate, client: inputClient)
@@ -41,17 +152,6 @@ final class TypingChaoInputController: IMKInputController {
             restoreStoredRimeSettings()
         }
 
-        candidateOverlay.setCandidateSelectionHandler { [weak self] candidateIndex in
-            self?.selectCandidate(candidateIndex)
-        }
-        candidateOverlay.setPageHandler { [weak self] pageBackward in
-            self?.changeCandidatePage(pageBackward: pageBackward)
-        }
-        candidateOverlay.setSettingsHandler { [weak self] in
-            DispatchQueue.main.async {
-                self?.showSettings()
-            }
-        }
         translationOverlay.setActionHandler { [weak self] actionName in
             switch actionName {
             case .useTranslation:
@@ -60,21 +160,39 @@ final class TypingChaoInputController: IMKInputController {
                 self?.commitOriginalTranslationDraft()
             }
         }
-        aiInputOverlay.setCommitHandler { [weak self] resultText in
-            self?.commitAIInputResult(resultText: resultText)
-        }
-        aiInputOverlay.setResultHandler { [weak self] resultText in
-            self?.updateAIInputMarkedResultPreview(resultText)
-        }
-        aiInputOverlay.setServiceProviderHandler { serviceProvider in
-            InputMethodSettings.shared.setAIServiceProvider(serviceProvider)
-        }
-        aiInputOverlay.setKeyHandler { [weak self] event in
-            self?.handleAIInputOverlayKey(event) ?? true
-        }
         sessionClient = inputClient as? IMKTextInput
         lastClient = sessionClient
         inputMethodMenu = InputMethodMenu(inputController: self)
+    }
+
+    // 共享浮层只接收当前激活控制器的业务动作，避免输入会话之间互相消费候选和 AI 结果。
+    private func bindOverlayHandlers() {
+        overlayManager.bind(
+            inputController: self,
+            candidateSelectionHandler: { [weak self] candidateIndex in
+                self?.selectCandidate(candidateIndex)
+            },
+            pageHandler: { [weak self] pageBackward in
+                self?.changeCandidatePage(pageBackward: pageBackward)
+            },
+            settingsHandler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.showSettings()
+                }
+            },
+            commitHandler: { [weak self] resultText in
+                self?.commitAIInputResult(resultText: resultText)
+            },
+            resultHandler: { [weak self] resultText in
+                self?.updateAIInputMarkedResultPreview(resultText)
+            },
+            serviceProviderHandler: { serviceProvider in
+                InputMethodSettings.shared.setAIServiceProvider(serviceProvider)
+            },
+            keyHandler: { [weak self] event in
+                self?.handleAIInputOverlayKey(event) ?? true
+            }
+        )
     }
 
 
@@ -91,12 +209,18 @@ final class TypingChaoInputController: IMKInputController {
 
     override func activateServer(_ sender: Any!) {
         super.activateServer(sender)
+        // AI 面板成为第一响应者时 IMK 可能重新激活当前控制器，此处不能把刚打开的面板按普通切换流程关闭。
+        if isAIInputPresentationActive {
+            overlayManager.restoreAIInputPresentation()
+            return
+        }
         // 激活时只绑定当前 IMK 会话，不启动跨进程正文或全局键盘监听。
         if let activeController = Self.activeOverlayController,
            activeController !== self {
             activeController.resetForExternalActivation()
         }
         Self.activeOverlayController = self
+        bindOverlayHandlers()
         aiInputCommandState.reset()
         suppressNextInputTextEqualsCallback = false
         suppressNextKeyDownEqualsCallback = false
@@ -120,21 +244,26 @@ final class TypingChaoInputController: IMKInputController {
 
     override func deactivateServer(_ sender: Any!) {
         // AI 面板可见时仍由当前控制器处理面板按键，不能因辅助层回调提前结束会话。
-        if isActiveAIInputController {
+        if isAIInputPresentationActive {
+            overlayManager.restoreAIInputPresentation()
             return
         }
+        let isBoundOverlayController = overlayManager.isBound(to: self)
         // 输入源切出前先上屏原文，避免输入法持有的 marked draft 因会话结束而丢失。
         discardPendingAIInputCommand(client: lastClient)
         closeAIInput()
         commitOriginalTranslationDraft()
         resetTranslationContext()
         rimeSession?.clearComposition()
-        candidateOverlay.hide()
+        if isBoundOverlayController {
+            candidateOverlay.hide()
+        }
         inputModeStatusOverlay.hide()
         currentRimeSnapshot = RimeSnapshot(dictionary: [:])
         if Self.activeOverlayController === self {
             Self.activeOverlayController = nil
         }
+        overlayManager.unbind(inputController: self)
         overlayAnchorCache.reset()
         lastClient = nil
         super.deactivateServer(sender)
@@ -142,11 +271,15 @@ final class TypingChaoInputController: IMKInputController {
 
     // 隐藏面板只隐藏当前浮层，不结束仍由 marked text 持有的翻译草稿。
     override func hidePalettes() {
-        if !isActiveAIInputController {
-            closeAIInput()
+        if isAIInputPresentationActive {
+            overlayManager.restoreAIInputPresentation()
+            return
         }
+        closeAIInput()
         cancelTranslationPresentationPreservingDraft()
-        candidateOverlay.hide()
+        if overlayManager.isBound(to: self) {
+            candidateOverlay.hide()
+        }
         inputModeStatusOverlay.hide()
         super.hidePalettes()
     }
@@ -158,6 +291,7 @@ final class TypingChaoInputController: IMKInputController {
         if Self.activeOverlayController === self {
             Self.activeOverlayController = nil
         }
+        overlayManager.unbind(inputController: self)
         commitOriginalTranslationDraft()
         resetTranslationContext()
         inputModeStatusOverlay.hide()
@@ -207,7 +341,7 @@ final class TypingChaoInputController: IMKInputController {
             suppressNextHostReturnAfterAICommand = false
             return true
         }
-        if aiInputOverlay.isVisible {
+        if overlayManager.isAIInputVisible {
             return handleAIInputKey(event: event, keyName: keyName, client: client)
         }
         let candidateAnchorBeforeEquals = keyName == AIInputCommandState.triggerText &&
@@ -292,7 +426,8 @@ final class TypingChaoInputController: IMKInputController {
         }
         prepareClient(client)
         // AI 面板仍复用当前控制器的 IMK 会话；同一轮 Return 可能再次经 inputText 回传，必须全部截断，不能交给宿主。
-        if aiInputOverlay.isVisible {
+        if overlayManager.isAIInputVisible {
+            let aiInputOverlay = ensureAIInputOverlay()
             guard let inputKeyName = TranslationPolicy.rimeKeyName(for: string) else {
                 return true
             }
@@ -371,7 +506,7 @@ final class TypingChaoInputController: IMKInputController {
             return
         }
         prepareClient(client)
-        if aiInputOverlay.isVisible {
+        if overlayManager.isAIInputVisible {
             return
         }
         if aiInputCommandState.isPending, aiInputCommandState.isTriggerReady {
@@ -844,16 +979,24 @@ final class TypingChaoInputController: IMKInputController {
         )
     }
 
-    // 菜单和候选条入口复用当前活动编辑客户端，选中文本时一并带入 AI 面板。
+    // 菜单动作可能在 IMK 暂时回调 deactivateServer 后到达，因此优先重新取得当前会话客户端，不能只依赖已清空的 lastClient。
     func showAIInput() {
-        guard let lastClient else {
+        guard let inputClient = currentInputClient() else {
             NSLog("TypingChao cannot show AI input without an active client")
             return
         }
+        prepareClient(inputClient)
         showAIInput(
-            client: lastClient,
-            selectionContext: selectedAIInputSelectionContext(from: lastClient)
+            client: inputClient,
+            selectionContext: selectedAIInputSelectionContext(from: inputClient)
         )
+    }
+
+    private func currentInputClient() -> IMKTextInput? {
+        if let currentClient = client() {
+            return currentClient
+        }
+        return sessionClient ?? lastClient
     }
 
 
@@ -915,7 +1058,7 @@ final class TypingChaoInputController: IMKInputController {
             dictionary: rimeSession.selectCandidate(UInt(candidateIndex))
         )
         guard snapshot.handled else { return }
-        if aiInputOverlay.isVisible {
+        if overlayManager.isAIInputVisible {
             updateAIInputOverlay(client: lastClient, snapshot: snapshot)
             return
         }
@@ -929,7 +1072,7 @@ final class TypingChaoInputController: IMKInputController {
             dictionary: rimeSession.changePageBackward(pageBackward)
         )
         guard snapshot.handled else { return }
-        if aiInputOverlay.isVisible {
+        if overlayManager.isAIInputVisible {
             updateAIInputOverlay(client: lastClient, snapshot: snapshot)
             return
         }
@@ -942,7 +1085,10 @@ final class TypingChaoInputController: IMKInputController {
            activeController !== self {
             activeController.resetForExternalActivation()
         }
-        Self.activeOverlayController = self
+        if Self.activeOverlayController !== self {
+            Self.activeOverlayController = self
+            bindOverlayHandlers()
+        }
         sessionClient = client
         lastClient = client
     }
@@ -983,9 +1129,13 @@ final class TypingChaoInputController: IMKInputController {
         Self.activeOverlayController === self
     }
 
+    // AI 面板展示期间忽略 IMK 的暂时性会话切换，避免面板刚置前就被生命周期清理。
+    private var isAIInputPresentationActive: Bool {
+        isPresentingAIInput || overlayManager.isAIInputPresented
+    }
+
     private var isActiveAIInputController: Bool {
-        Self.activeAIInputController === self &&
-            (isPresentingAIInput || aiInputOverlay.isVisible)
+        Self.activeAIInputController === self && isAIInputPresentationActive
     }
 
     // 系统启用安全事件输入时禁止把已提交文本交给远程翻译服务。
@@ -1018,6 +1168,7 @@ final class TypingChaoInputController: IMKInputController {
         rimeSession?.clearComposition()
         candidateOverlay.hide()
         inputModeStatusOverlay.hide()
+        overlayManager.unbind(inputController: self)
         currentRimeSnapshot = RimeSnapshot(dictionary: [:])
         overlayAnchorCache.reset()
         lastClient = nil
@@ -1235,12 +1386,15 @@ final class TypingChaoInputController: IMKInputController {
         client: IMKTextInput,
         selectionContext: AIInputSelectionContext? = nil
     ) {
-        if let activeAIInputController = Self.activeAIInputController,
-           activeAIInputController !== self,
-           activeAIInputController.aiInputOverlay.isVisible {
+        if let activeAIInputController = Self.activeAIInputController {
+            if activeAIInputController !== self {
+                return
+            }
+            overlayManager.restoreAIInputPresentation()
             return
         }
-        guard !aiInputOverlay.isVisible else {
+        guard !overlayManager.isAIInputVisible else {
+            overlayManager.restoreAIInputPresentation()
             return
         }
         guard !isSecureInputActive else {
@@ -1279,7 +1433,7 @@ final class TypingChaoInputController: IMKInputController {
         translationOverlay.hide()
         inputModeStatusOverlay.hide()
         activeAIInputSelection = selectionContext
-        aiInputOverlay.show(
+        ensureAIInputOverlay().show(
             anchor: anchor,
             prefilledPromptText: selectionContext?.selectedText ?? ""
         )
@@ -1335,8 +1489,10 @@ final class TypingChaoInputController: IMKInputController {
         activeAIInputSelection = nil
         rimeSession?.clearComposition()
         currentRimeSnapshot = RimeSnapshot(dictionary: rimeSession?.currentSnapshot() ?? [:])
-        candidateOverlay.hide()
-        aiInputOverlay.hide()
+        if overlayManager.isBound(to: self) {
+            candidateOverlay.hide()
+            overlayManager.hideAIInputIfCreated()
+        }
         if Self.activeAIInputController === self {
             Self.activeAIInputController = nil
         }
@@ -1358,6 +1514,7 @@ final class TypingChaoInputController: IMKInputController {
         keyName: String,
         client: IMKTextInput
     ) -> Bool {
+        let aiInputOverlay = ensureAIInputOverlay()
         if keyName == "Escape" {
             if currentRimeSnapshot.isComposing {
                 clearAIInputComposition()
@@ -1639,6 +1796,7 @@ final class TypingChaoInputController: IMKInputController {
 
     // AI 输入复用 librime 选词和翻页，但只更新面板草稿，绝不把中间文本写入宿主编辑框。
     private func updateAIInputOverlay(client: IMKTextInput, snapshot: RimeSnapshot) {
+        let aiInputOverlay = ensureAIInputOverlay()
         currentRimeSnapshot = snapshot
         if !snapshot.commitText.isEmpty {
             aiInputOverlay.appendPromptText(snapshot.commitText)
@@ -1654,6 +1812,7 @@ final class TypingChaoInputController: IMKInputController {
 
     // 取消 AI 面板内当前拼音组合，不影响已累积的 AI 提示词或宿主正文。
     private func clearAIInputComposition() {
+        let aiInputOverlay = ensureAIInputOverlay()
         rimeSession?.clearComposition()
         currentRimeSnapshot = RimeSnapshot(dictionary: rimeSession?.currentSnapshot() ?? [:])
         aiInputOverlay.updatePromptComposition(currentRimeSnapshot.preeditText)

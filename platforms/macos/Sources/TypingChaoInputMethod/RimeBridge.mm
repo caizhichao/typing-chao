@@ -200,6 +200,7 @@ NSDictionary<NSString*, id>* snapshotAfterAction(RimeSessionId sessionId,
 
 @implementation TDNRimeSession {
   RimeSessionId _sessionId;
+  NSArray<NSDictionary<NSString *, NSString *> *> *_schemaListCache;
 }
 
 - (instancetype)initWithSharedDataDirectory:(NSString *)sharedDataDirectory
@@ -298,6 +299,10 @@ NSDictionary<NSString*, id>* snapshotAfterAction(RimeSessionId sessionId,
   if (!g_rime) {
     return @[];
   }
+  // Rime 数据在进程首次初始化前已完成部署，菜单查询不应重复触发 schema YAML 解析。
+  if (_schemaListCache) {
+    return _schemaListCache;
+  }
   RimeSchemaList schemaList = {};
   if (!g_rime->get_schema_list(&schemaList)) {
     return @[];
@@ -312,7 +317,8 @@ NSDictionary<NSString*, id>* snapshotAfterAction(RimeSessionId sessionId,
     }];
   }
   g_rime->free_schema_list(&schemaList);
-  return result;
+  _schemaListCache = [result copy];
+  return _schemaListCache;
 }
 
 - (NSDictionary<NSString *, id> *)selectSchema:(NSString *)schemaIdentifier {

@@ -10,6 +10,7 @@ final class AIInputOverlay {
     private var resultHandler: ((String) -> Void)?
     private var serviceProviderHandler: ((AIServiceProvider) -> Void)?
     private var currentAnchor: InputOverlayAnchor?
+    private(set) var isPresented = false
 
     init() {
         let contentView = AIInputOverlayContentView(frame: NSRect(origin: .zero, size: Self.panelSize))
@@ -29,6 +30,8 @@ final class AIInputOverlay {
         panel.hasShadow = true
         panel.level = .floating
         panel.hidesOnDeactivate = false
+        panel.animationBehavior = .none
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         // 输入区需要允许非激活面板接收第一响应者，避免只能点击后才获得焦点。
         panel.becomesKeyOnlyIfNeeded = false
         panel.acceptsMouseMovedEvents = true
@@ -45,6 +48,9 @@ final class AIInputOverlay {
             guard let self else { return }
             let panelSize = isExpanded ? Self.panelSize : Self.emptyPanelSize
             self.setPanelSize(panelSize, anchor: self.currentAnchor)
+        }
+        contentView.pageReadyHandler = { [weak self] in
+            self?.restorePresentation()
         }
     }
 
@@ -79,13 +85,23 @@ final class AIInputOverlay {
 
     // 用户主动触发 AI 输入时让隐藏的原生键盘入口获得焦点，并预填用户明确选中的原文。
     func show(anchor: InputOverlayAnchor?, prefilledPromptText: String = "") {
+        isPresented = true
         currentAnchor = anchor
         contentView.reset(prefilledPromptText: prefilledPromptText)
         setPanelSize(Self.emptyPanelSize, anchor: anchor)
         if anchor == nil {
             panel.center()
         }
-        panel.makeKeyAndOrderFront(nil)
+        guard contentView.isPageReady else { return }
+        restorePresentation()
+    }
+
+    // IMK 可能在非激活面板成为 key window 时再次回调生命周期方法，这里只恢复同一面板，不重置 Web UI 对话。
+    func restorePresentation() {
+        guard isPresented, contentView.isPageReady else { return }
+        // 输入法进程通常不是当前激活应用，先按辅助浮层惯例强制置前，再把第一响应者交给原生键盘入口。
+        panel.orderFrontRegardless()
+        panel.makeKey()
         contentView.focusPromptInput()
     }
 
@@ -111,6 +127,8 @@ final class AIInputOverlay {
     }
 
     func hide() {
+        guard isPresented else { return }
+        isPresented = false
         contentView.cancelRequest()
         contentView.clearRuntimeConfiguration()
         currentAnchor = nil
@@ -162,11 +180,16 @@ private final class AIInputOverlayContentView: NSView {
     var resultHandler: ((String) -> Void)?
     var serviceProviderHandler: ((AIServiceProvider) -> Void)?
     var expandedLayoutHandler: ((Bool) -> Void)?
+    var pageReadyHandler: (() -> Void)?
 
     private let webView = TypingChaoWebView(webViewName: .aiInput, acceptsKeyboardFocus: false)
     private let keyCaptureView = AIInputKeyCaptureView(frame: .zero)
     private var isPromptInputEnabled = true
     private var currentResultText = ""
+
+    var isPageReady: Bool {
+        webView.isPageReady
+    }
 
     var acceptsPromptInput: Bool {
         isPromptInputEnabled
@@ -253,6 +276,9 @@ private final class AIInputOverlayContentView: NSView {
         ])
         webView.setMessageHandler { [weak self] messageBody in
             self?.handleWebMessage(messageBody)
+        }
+        webView.setPageReadyHandler { [weak self] in
+            self?.pageReadyHandler?()
         }
         webView.loadBundledPage()
     }
