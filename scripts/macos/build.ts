@@ -70,6 +70,7 @@ run("clang++", [
 const swiftFiles = [
   join(sourceRoot, "RimeSnapshot.swift"),
   join(sourceRoot, "RimeInputPolicy.swift"),
+  join(sourceRoot, "SpecialInputExpansion.swift"),
   join(sourceRoot, "AIInputCommand.swift"),
   join(sourceRoot, "AIInputSelection.swift"),
   join(sourceRoot, "InputMethodSettings.swift"),

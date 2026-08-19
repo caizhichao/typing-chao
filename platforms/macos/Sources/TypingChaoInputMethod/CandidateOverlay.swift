@@ -6,6 +6,7 @@ final class CandidateOverlay {
     private let webView = TypingChaoWebView(webViewName: .candidate, acceptsKeyboardFocus: false)
 
     private var candidateSelectionHandler: ((Int) -> Void)?
+    private var specialInputExpansionHandler: (() -> Void)?
     private var pageHandler: ((Bool) -> Void)?
     private var settingsHandler: (() -> Void)?
 
@@ -46,6 +47,10 @@ final class CandidateOverlay {
         candidateSelectionHandler = selectionHandler
     }
 
+    func setSpecialInputExpansionHandler(_ expansionHandler: @escaping () -> Void) {
+        specialInputExpansionHandler = expansionHandler
+    }
+
     func setPageHandler(_ pageHandler: @escaping (Bool) -> Void) {
         self.pageHandler = pageHandler
     }
@@ -64,6 +69,26 @@ final class CandidateOverlay {
             snapshot: snapshot,
             maximumPanelWidth: anchor.availableOverlayWidth,
             isAIInputTriggerVisible: false
+        )
+        show(candidateState: candidateState, anchor: anchor)
+    }
+
+    // 扩展候选不经过 librime 菜单，仍复用同一候选壳，保证鼠标选择和普通候选使用同一入口。
+    func show(
+        candidates: [RimeCandidateItem],
+        highlightedIndex: Int,
+        specialInputExpansionKind: SpecialInputExpansionKind,
+        anchor: InputOverlayAnchor
+    ) {
+        guard !candidates.isEmpty else {
+            hide()
+            return
+        }
+        let candidateState = CandidateWebState(
+            candidateList: candidates,
+            highlightedIndex: highlightedIndex,
+            maximumPanelWidth: anchor.availableOverlayWidth,
+            specialInputExpansionKind: specialInputExpansionKind
         )
         show(candidateState: candidateState, anchor: anchor)
     }
@@ -121,6 +146,8 @@ final class CandidateOverlay {
         case "selectCandidate":
             guard let candidateIndex = messageData["candidateIndex"] as? Int else { return }
             candidateSelectionHandler?(candidateIndex)
+        case "selectSpecialInputExpansion":
+            specialInputExpansionHandler?()
         case "changePage":
             guard let pageBackward = messageData["pageBackward"] as? Bool else { return }
             pageHandler?(pageBackward)
@@ -229,6 +256,13 @@ private struct CandidateWebState {
     let candidateList: [CandidateWebItem]
     let highlightedIndex: Int
     let isAIInputTriggerVisible: Bool
+    let isSpecialInputExpansionVisible: Bool
+    let specialInputExpansionTitle: String
+    let isSpecialInputExpansionTriggerVisible: Bool
+    let specialInputExpansionTriggerInsertIndex: Int
+    let specialInputExpansionTriggerLabelText: String
+    let specialInputExpansionTriggerText: String
+    let specialInputExpansionTriggerWidthPoint: CGFloat
     let hasPageControls: Bool
     let pageText: String
     let isPreviousPageEnabled: Bool
@@ -240,14 +274,93 @@ private struct CandidateWebState {
         maximumPanelWidth: CGFloat,
         isAIInputTriggerVisible: Bool
     ) {
-        self.isAIInputTriggerVisible = isAIInputTriggerVisible
         let displayedCandidateList: [RimeCandidateItem]
         if isAIInputTriggerVisible {
             displayedCandidateList = [Self.aiInputTriggerCandidate]
         } else {
             displayedCandidateList = snapshot.candidateList
         }
-        hasPageControls = !isAIInputTriggerVisible && (snapshot.pageNumber > 0 || !snapshot.isLastPage)
+        let specialInputExpansionTriggerKind: SpecialInputExpansionKind?
+        if isAIInputTriggerVisible {
+            specialInputExpansionTriggerKind = nil
+        } else {
+            specialInputExpansionTriggerKind = SpecialInputExpansionCatalog.kind(for: snapshot)
+        }
+        self.init(
+            candidateList: displayedCandidateList,
+            highlightedIndex: isAIInputTriggerVisible ? 0 : snapshot.highlightedIndex,
+            maximumPanelWidth: maximumPanelWidth,
+            isAIInputTriggerVisible: isAIInputTriggerVisible,
+            specialInputExpansionKind: nil,
+            specialInputExpansionTriggerKind: specialInputExpansionTriggerKind,
+            hasPageControls: !isAIInputTriggerVisible && (snapshot.pageNumber > 0 || !snapshot.isLastPage),
+            pageText: !isAIInputTriggerVisible && (snapshot.pageNumber > 0 || !snapshot.isLastPage)
+                ? "\(snapshot.pageNumber + 1)"
+                : "",
+            isPreviousPageEnabled: !isAIInputTriggerVisible && snapshot.pageNumber > 0,
+            isNextPageEnabled: !isAIInputTriggerVisible && !snapshot.isLastPage
+        )
+    }
+
+    init(
+        candidateList: [RimeCandidateItem],
+        highlightedIndex: Int,
+        maximumPanelWidth: CGFloat,
+        specialInputExpansionKind: SpecialInputExpansionKind? = nil
+    ) {
+        self.init(
+            candidateList: candidateList,
+            highlightedIndex: highlightedIndex,
+            maximumPanelWidth: maximumPanelWidth,
+            isAIInputTriggerVisible: false,
+            specialInputExpansionKind: specialInputExpansionKind,
+            specialInputExpansionTriggerKind: nil,
+            hasPageControls: false,
+            pageText: "",
+            isPreviousPageEnabled: false,
+            isNextPageEnabled: false
+        )
+    }
+
+    private init(
+        candidateList displayedCandidateList: [RimeCandidateItem],
+        highlightedIndex requestedHighlightedIndex: Int,
+        maximumPanelWidth: CGFloat,
+        isAIInputTriggerVisible: Bool,
+        specialInputExpansionKind: SpecialInputExpansionKind?,
+        specialInputExpansionTriggerKind: SpecialInputExpansionKind?,
+        hasPageControls: Bool,
+        pageText: String,
+        isPreviousPageEnabled: Bool,
+        isNextPageEnabled: Bool
+    ) {
+        self.isAIInputTriggerVisible = isAIInputTriggerVisible
+        self.isSpecialInputExpansionVisible = specialInputExpansionKind != nil
+        self.specialInputExpansionTitle = specialInputExpansionKind?.displayTitle ?? ""
+        self.hasPageControls = hasPageControls
+        self.pageText = pageText
+        self.isPreviousPageEnabled = isPreviousPageEnabled
+        self.isNextPageEnabled = isNextPageEnabled
+        let specialTriggerIndex = specialInputExpansionTriggerKind.flatMap { kind in
+            displayedCandidateList.firstIndex { candidate in
+                candidate.textValue == kind.triggerText
+            }
+        }
+        self.isSpecialInputExpansionTriggerVisible = specialTriggerIndex != nil
+        self.specialInputExpansionTriggerInsertIndex = specialTriggerIndex ?? -1
+        self.specialInputExpansionTriggerLabelText = specialTriggerIndex.map { String($0 + 2) } ?? ""
+        self.specialInputExpansionTriggerText = specialInputExpansionTriggerKind?.triggerText ?? ""
+        if let specialInputExpansionTriggerKind {
+            self.specialInputExpansionTriggerWidthPoint = Self.width(
+                for: RimeCandidateItem(
+                    textValue: "▦ \(specialInputExpansionTriggerKind.triggerText)",
+                    labelText: "",
+                    commentText: ""
+                )
+            )
+        } else {
+            self.specialInputExpansionTriggerWidthPoint = 0
+        }
         let boundedMaximumWidth = min(
             max(maximumPanelWidth, 1),
             CandidateBarStyle.maximumPanelWidth
@@ -256,9 +369,10 @@ private struct CandidateWebState {
             candidateList: displayedCandidateList,
             maximumPanelWidth: boundedMaximumWidth,
             hasPageControls: hasPageControls,
-            isAIInputTriggerVisible: isAIInputTriggerVisible
+            isAIInputTriggerVisible: isAIInputTriggerVisible,
+            reservedWidth: self.specialInputExpansionTriggerWidthPoint
         )
-        candidateList = displayedCandidateList.enumerated().map { candidateIndex, candidateItem in
+        self.candidateList = displayedCandidateList.enumerated().map { candidateIndex, candidateItem in
             CandidateWebItem(
                 labelText: candidateItem.labelText,
                 textValue: candidateItem.textValue,
@@ -267,30 +381,39 @@ private struct CandidateWebState {
             )
         }
         if isAIInputTriggerVisible {
-            highlightedIndex = 0
-        } else if displayedCandidateList.indices.contains(snapshot.highlightedIndex) {
-            highlightedIndex = snapshot.highlightedIndex
+            self.highlightedIndex = 0
+        } else if displayedCandidateList.indices.contains(requestedHighlightedIndex) {
+            self.highlightedIndex = requestedHighlightedIndex
         } else {
-            highlightedIndex = -1
+            self.highlightedIndex = -1
         }
-        pageText = hasPageControls ? "\(snapshot.pageNumber + 1)" : ""
-        isPreviousPageEnabled = hasPageControls && snapshot.pageNumber > 0
-        isNextPageEnabled = hasPageControls && !snapshot.isLastPage
         let panelHeight: CGFloat
-        if displayedCandidateList.contains(where: { !$0.commentText.isEmpty }) {
+        if specialInputExpansionKind != nil {
+            panelHeight = CGFloat(displayedCandidateList.count * 30 + 12)
+        } else if displayedCandidateList.contains(where: { !$0.commentText.isEmpty }) {
             panelHeight = CandidateBarStyle.commentPanelHeight
         } else {
             panelHeight = CandidateBarStyle.compactPanelHeight
         }
-        let preferredPanelWidth = widthList.reduce(CandidateBarStyle.horizontalInset, +) +
-            CandidateBarTrailingLayout.requiredWidth(hasPageControls: hasPageControls)
-        let minimumPanelWidth = CandidateBarStyle.minimumCandidateWidth +
-            CandidateBarStyle.horizontalInset +
-            CandidateBarTrailingLayout.requiredWidth(hasPageControls: hasPageControls)
-        panelSize = NSSize(
-            width: min(boundedMaximumWidth, max(preferredPanelWidth, minimumPanelWidth)),
-            height: panelHeight
-        )
+        if specialInputExpansionKind != nil {
+            let widestCandidateWidth = widthList.max() ?? CandidateBarStyle.minimumCandidateWidth
+            panelSize = NSSize(
+                width: min(boundedMaximumWidth, max(widestCandidateWidth + 36, 220)),
+                height: panelHeight
+            )
+        } else {
+            let preferredPanelWidth = widthList.reduce(CandidateBarStyle.horizontalInset, +) +
+                specialInputExpansionTriggerWidthPoint +
+                CandidateBarTrailingLayout.requiredWidth(hasPageControls: hasPageControls)
+            let minimumPanelWidth = CandidateBarStyle.minimumCandidateWidth +
+                CandidateBarStyle.horizontalInset +
+                specialInputExpansionTriggerWidthPoint +
+                CandidateBarTrailingLayout.requiredWidth(hasPageControls: hasPageControls)
+            panelSize = NSSize(
+                width: min(boundedMaximumWidth, max(preferredPanelWidth, minimumPanelWidth)),
+                height: panelHeight
+            )
+        }
     }
 
     var messageData: [String: Any] {
@@ -305,6 +428,13 @@ private struct CandidateWebState {
             },
             "highlightedIndex": highlightedIndex,
             "isAIInputTriggerVisible": isAIInputTriggerVisible,
+            "isSpecialInputExpansionVisible": isSpecialInputExpansionVisible,
+            "specialInputExpansionTitle": specialInputExpansionTitle,
+            "isSpecialInputExpansionTriggerVisible": isSpecialInputExpansionTriggerVisible,
+            "specialInputExpansionTriggerInsertIndex": specialInputExpansionTriggerInsertIndex,
+            "specialInputExpansionTriggerLabelText": specialInputExpansionTriggerLabelText,
+            "specialInputExpansionTriggerText": specialInputExpansionTriggerText,
+            "specialInputExpansionTriggerWidthPoint": Double(specialInputExpansionTriggerWidthPoint),
             "hasPageControls": hasPageControls,
             "pageText": pageText,
             "isPreviousPageEnabled": isPreviousPageEnabled,
@@ -317,7 +447,8 @@ private struct CandidateWebState {
         candidateList: [RimeCandidateItem],
         maximumPanelWidth: CGFloat,
         hasPageControls: Bool,
-        isAIInputTriggerVisible: Bool
+        isAIInputTriggerVisible: Bool,
+        reservedWidth: CGFloat
     ) -> [CGFloat] {
         let idealWidthList = candidateList.enumerated().map { candidateIndex, candidateItem in
             if isAIInputTriggerVisible, candidateIndex == 0 {
@@ -328,7 +459,8 @@ private struct CandidateWebState {
         guard !idealWidthList.isEmpty else { return [] }
         let availableCandidateWidth = max(
             maximumPanelWidth - CandidateBarStyle.horizontalInset -
-                CandidateBarTrailingLayout.requiredWidth(hasPageControls: hasPageControls),
+                CandidateBarTrailingLayout.requiredWidth(hasPageControls: hasPageControls) -
+                reservedWidth,
             1
         )
         let idealWidth = idealWidthList.reduce(CGFloat.zero, +)

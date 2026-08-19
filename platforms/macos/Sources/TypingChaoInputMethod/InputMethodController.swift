@@ -10,6 +10,7 @@ private final class TypingChaoOverlayManager {
     private var aiInputOverlayStorage: AIInputOverlay?
     private weak var boundInputController: TypingChaoInputController?
     private var candidateSelectionHandler: ((Int) -> Void)?
+    private var specialInputExpansionHandler: (() -> Void)?
     private var pageHandler: ((Bool) -> Void)?
     private var settingsHandler: (() -> Void)?
     private var commitHandler: ((String) -> Void)?
@@ -21,6 +22,9 @@ private final class TypingChaoOverlayManager {
         candidateOverlay = CandidateOverlay()
         candidateOverlay.setCandidateSelectionHandler { [weak self] candidateIndex in
             self?.candidateSelectionHandler?(candidateIndex)
+        }
+        candidateOverlay.setSpecialInputExpansionHandler { [weak self] in
+            self?.specialInputExpansionHandler?()
         }
         candidateOverlay.setPageHandler { [weak self] pageBackward in
             self?.pageHandler?(pageBackward)
@@ -67,6 +71,7 @@ private final class TypingChaoOverlayManager {
     func bind(
         inputController: TypingChaoInputController,
         candidateSelectionHandler: @escaping (Int) -> Void,
+        specialInputExpansionHandler: @escaping () -> Void,
         pageHandler: @escaping (Bool) -> Void,
         settingsHandler: @escaping () -> Void,
         commitHandler: @escaping (String) -> Void,
@@ -76,6 +81,7 @@ private final class TypingChaoOverlayManager {
     ) {
         boundInputController = inputController
         self.candidateSelectionHandler = candidateSelectionHandler
+        self.specialInputExpansionHandler = specialInputExpansionHandler
         self.pageHandler = pageHandler
         self.settingsHandler = settingsHandler
         self.commitHandler = commitHandler
@@ -90,6 +96,7 @@ private final class TypingChaoOverlayManager {
         }
         boundInputController = nil
         candidateSelectionHandler = nil
+        specialInputExpansionHandler = nil
         pageHandler = nil
         settingsHandler = nil
         commitHandler = nil
@@ -125,6 +132,8 @@ final class TypingChaoInputController: IMKInputController {
     private let translationSessionIdentifier = UUID().uuidString
     private var translationGeneration = 0
     private var currentRimeSnapshot = RimeSnapshot(dictionary: [:])
+    private var specialInputExpansionState: SpecialInputExpansionState?
+    private var pendingSpecialInputExpansionKind: SpecialInputExpansionKind?
     private var overlayAnchorCache = InputOverlayAnchorCache()
     private var sessionClient: IMKTextInput?
     private var lastClient: IMKTextInput?
@@ -171,6 +180,9 @@ final class TypingChaoInputController: IMKInputController {
             inputController: self,
             candidateSelectionHandler: { [weak self] candidateIndex in
                 self?.selectCandidate(candidateIndex)
+            },
+            specialInputExpansionHandler: { [weak self] in
+                self?.selectSpecialInputExpansion()
             },
             pageHandler: { [weak self] pageBackward in
                 self?.changeCandidatePage(pageBackward: pageBackward)
@@ -226,6 +238,7 @@ final class TypingChaoInputController: IMKInputController {
         suppressNextKeyDownEqualsCallback = false
         resetTranslationContext()
         closeAIInput()
+        clearSpecialInputExpansion(client: sessionClient)
         rimeSession?.clearComposition()
         currentRimeSnapshot = RimeSnapshot(dictionary: [:])
         candidateOverlay.hide()
@@ -251,6 +264,7 @@ final class TypingChaoInputController: IMKInputController {
         let isBoundOverlayController = overlayManager.isBound(to: self)
         // 输入源切出前先上屏原文，避免输入法持有的 marked draft 因会话结束而丢失。
         discardPendingAIInputCommand(client: lastClient)
+        clearSpecialInputExpansion(client: lastClient)
         closeAIInput()
         commitOriginalTranslationDraft()
         resetTranslationContext()
@@ -275,6 +289,7 @@ final class TypingChaoInputController: IMKInputController {
             overlayManager.restoreAIInputPresentation()
             return
         }
+        clearSpecialInputExpansion(client: lastClient)
         closeAIInput()
         cancelTranslationPresentationPreservingDraft()
         if overlayManager.isBound(to: self) {
@@ -287,6 +302,7 @@ final class TypingChaoInputController: IMKInputController {
     // 输入会话销毁时取消所有网络和宿主变更观察任务，避免客户端代理被异步任务继续持有。
     override func inputControllerWillClose() {
         discardPendingAIInputCommand(client: lastClient)
+        clearSpecialInputExpansion(client: lastClient)
         closeAIInput()
         if Self.activeOverlayController === self {
             Self.activeOverlayController = nil
@@ -343,6 +359,9 @@ final class TypingChaoInputController: IMKInputController {
         }
         if overlayManager.isAIInputVisible {
             return handleAIInputKey(event: event, keyName: keyName, client: client)
+        }
+        if specialInputExpansionState != nil {
+            return handleSpecialInputExpansionKey(keyName, client: client)
         }
         let candidateAnchorBeforeEquals = keyName == AIInputCommandState.triggerText &&
             isPlainAIInputCommandKey(event)
@@ -443,9 +462,29 @@ final class TypingChaoInputController: IMKInputController {
             }
             return true
         }
+        if specialInputExpansionState != nil {
+            guard let inputKeyName = TranslationPolicy.rimeKeyName(for: string) else {
+                return true
+            }
+            return handleSpecialInputExpansionKey(inputKeyName, client: client)
+        }
         guard let inputKeyName = TranslationPolicy.rimeKeyName(for: string) else {
             discardPendingAIInputCommand(client: client)
             return super.inputText(string, client: sender)
+        }
+        if let specialInputExpansionKind = SpecialInputExpansionCatalog.kind(
+            forSpecialTriggerSelectionKey: inputKeyName,
+            snapshot: currentRimeSnapshot
+        ) {
+            pendingSpecialInputExpansionKind = specialInputExpansionKind
+            if let rimeSession {
+                rimeSession.clearComposition()
+                currentRimeSnapshot = RimeSnapshot(
+                    dictionary: rimeSession.currentSnapshot()
+                )
+            }
+            updateClient(client, snapshot: currentRimeSnapshot)
+            return true
         }
         if inputKeyName == AIInputCommandState.triggerText {
             let candidateAnchorBeforeEquals = resolvedOverlayAnchor(
@@ -540,6 +579,13 @@ final class TypingChaoInputController: IMKInputController {
 
     // 完整快照是 marked text、候选壳与提交文本的唯一状态来源，避免各层自行推断分页和光标。
     private func updateClient(_ client: IMKTextInput, snapshot: RimeSnapshot) {
+        if let pendingSpecialInputExpansionKind {
+            activateSpecialInputExpansion(
+                kind: pendingSpecialInputExpansionKind,
+                client: client
+            )
+            return
+        }
         let previousSnapshot = currentRimeSnapshot
         let wasComposing = previousSnapshot.isComposing
         let statusMessage = InputModeStatusMessage.resolve(
@@ -1079,6 +1125,186 @@ final class TypingChaoInputController: IMKInputController {
         updateClient(lastClient, snapshot: snapshot)
     }
 
+    // 点击候选条里的特殊入口时复用当前 Rime 拼音快照，不让 Web UI 直接改写输入引擎状态。
+    private func selectSpecialInputExpansion() {
+        guard let lastClient,
+              let specialInputExpansionKind = SpecialInputExpansionCatalog.kind(
+                  for: currentRimeSnapshot
+              ),
+              SpecialInputExpansionCatalog.specialTriggerInsertIndex(
+                  for: currentRimeSnapshot
+              ) != nil else {
+            return
+        }
+        activateSpecialInputExpansion(
+            kind: specialInputExpansionKind,
+            client: lastClient
+        )
+    }
+
+    // 日期和时间扩展独立持有第二阶段候选，避免把动态结果伪装成 librime 的静态提交文本。
+    private func handleSpecialInputExpansionKey(
+        _ keyName: String,
+        client: IMKTextInput
+    ) -> Bool {
+        guard let expansionState = specialInputExpansionState else {
+            return false
+        }
+        if keyName == "Escape" || keyName == "BackSpace" {
+            _ = clearSpecialInputExpansion(client: client)
+            return true
+        }
+        if keyName == "Return" || keyName == "space" {
+            commitSpecialInputExpansion(
+                candidateIndex: expansionState.highlightedIndex,
+                client: client
+            )
+            return true
+        }
+        if let candidateIndex = specialCandidateIndex(
+            for: keyName,
+            candidateList: expansionState.candidateList
+        ) {
+            commitSpecialInputExpansion(candidateIndex: candidateIndex, client: client)
+            return true
+        }
+        if keyName == "Left" || keyName == "Up" {
+            updateSpecialInputExpansionHighlight(
+                expansionState: expansionState,
+                candidateIndex: max(expansionState.highlightedIndex - 1, 0),
+                client: client
+            )
+            return true
+        }
+        if keyName == "Right" || keyName == "Down" || keyName == "Tab" {
+            let nextIndex = min(
+                expansionState.highlightedIndex + 1,
+                expansionState.candidateList.count - 1
+            )
+            updateSpecialInputExpansionHighlight(
+                expansionState: expansionState,
+                candidateIndex: nextIndex,
+                client: client
+            )
+            return true
+        }
+        return true
+    }
+
+    // 选中日期或时间主词后先清理原拼音，再在同一光标位置展示固定时间快照的扩展候选。
+    private func activateSpecialInputExpansion(
+        kind: SpecialInputExpansionKind,
+        client: IMKTextInput
+    ) {
+        commitOriginalTranslationDraft(
+            client: client,
+            includesCurrentComposition: false
+        )
+        resetTranslationContext()
+        clearSpecialInputExpansion(client: client)
+        let expansionState = SpecialInputExpansionCatalog.state(for: kind)
+        guard !expansionState.candidateList.isEmpty else {
+            NSLog("TypingChao failed to build %@ expansion candidates", kind.rawValue)
+            return
+        }
+        specialInputExpansionState = expansionState
+        currentRimeSnapshot = RimeSnapshot(
+            dictionary: rimeSession?.currentSnapshot() ?? [:]
+        )
+        updateSpecialInputExpansionOverlay(client: client)
+    }
+
+    private func updateSpecialInputExpansionHighlight(
+        expansionState: SpecialInputExpansionState,
+        candidateIndex: Int,
+        client: IMKTextInput
+    ) {
+        guard expansionState.candidateList.indices.contains(candidateIndex) else {
+            return
+        }
+        specialInputExpansionState = SpecialInputExpansionState(
+            kind: expansionState.kind,
+            candidateList: expansionState.candidateList,
+            highlightedIndex: candidateIndex
+        )
+        updateSpecialInputExpansionOverlay(client: client)
+    }
+
+    private func updateSpecialInputExpansionOverlay(client: IMKTextInput) {
+        guard let expansionState = specialInputExpansionState,
+              let anchor = resolvedOverlayAnchor(client: client, allowsCachedAnchor: false) else {
+            candidateOverlay.hide()
+            return
+        }
+        candidateOverlay.show(
+            candidates: expansionState.candidateList,
+            highlightedIndex: expansionState.highlightedIndex,
+            specialInputExpansionKind: expansionState.kind,
+            anchor: anchor
+        )
+    }
+
+    private func commitSpecialInputExpansion(
+        candidateIndex: Int,
+        client: IMKTextInput
+    ) {
+        guard let expansionState = specialInputExpansionState,
+              expansionState.candidateList.indices.contains(candidateIndex) else {
+            return
+        }
+        let outputText = expansionState.candidateList[candidateIndex].textValue
+        _ = clearSpecialInputExpansion(client: client)
+        client.insertText(
+            outputText,
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+    }
+
+    private func specialCandidateIndex(
+        for keyName: String,
+        candidateList: [RimeCandidateItem]
+    ) -> Int? {
+        if let candidateIndex = candidateList.firstIndex(
+            where: { $0.labelText == keyName }
+        ) {
+            return candidateIndex
+        }
+        guard let numericIndex = Int(keyName),
+              numericIndex > 0 else {
+            return nil
+        }
+        let candidateIndex = numericIndex - 1
+        guard candidateList.indices.contains(candidateIndex) else {
+            return nil
+        }
+        return candidateIndex
+    }
+
+    // 扩展取消时同时清空 marked text 和 Rime 组合，避免下一次普通输入继承上一轮动态状态。
+    @discardableResult
+    private func clearSpecialInputExpansion(client: IMKTextInput?) -> Bool {
+        guard specialInputExpansionState != nil || pendingSpecialInputExpansionKind != nil else {
+            return false
+        }
+        specialInputExpansionState = nil
+        pendingSpecialInputExpansionKind = nil
+        rimeSession?.clearComposition()
+        currentRimeSnapshot = RimeSnapshot(
+            dictionary: rimeSession?.currentSnapshot() ?? [:]
+        )
+        candidateOverlay.hide()
+        inputModeStatusOverlay.hide()
+        if let client {
+            client.setMarkedText(
+                "",
+                selectionRange: NSRange(location: 0, length: 0),
+                replacementRange: NSRange(location: NSNotFound, length: 0)
+            )
+        }
+        overlayAnchorCache.reset()
+        return true
+    }
+
     // 同一控制器内 IMK 客户端代理可能逐次变化，只更新当前代理，不据此清空整句草稿。
     private func prepareClient(_ client: IMKTextInput) {
         if let activeController = Self.activeOverlayController,
@@ -1162,6 +1388,7 @@ final class TypingChaoInputController: IMKInputController {
             return
         }
         discardPendingAIInputCommand(client: lastClient)
+        clearSpecialInputExpansion(client: lastClient)
         closeAIInput()
         commitOriginalTranslationDraft()
         resetTranslationContext()
@@ -1357,6 +1584,9 @@ final class TypingChaoInputController: IMKInputController {
 
     // Esc 只取消当前拼音和译文展示，已经确认的 marked draft 保留给后续继续输入。
     private func clearInputCache(client: IMKTextInput) -> Bool {
+        if clearSpecialInputExpansion(client: client) {
+            return true
+        }
         let hadActiveInputState = currentRimeSnapshot.isComposing ||
             translationDraft.hasText ||
             translationTask != nil
@@ -1561,7 +1791,8 @@ final class TypingChaoInputController: IMKInputController {
             : []
         guard let snapshot = processRimeKey(
             inputKeyName,
-            modifiers: inputModifierNames
+            modifiers: inputModifierNames,
+            allowSpecialInputExpansion: false
         ) else {
             if keyName == "BackSpace", !previousSnapshot.isComposing {
                 aiInputOverlay.deleteBackwardPromptText()
@@ -1820,7 +2051,11 @@ final class TypingChaoInputController: IMKInputController {
     }
 
     // 符号产生多选标点时在 UI 刷新前直接确认目标项，避免首符号或拼音后的符号拉起候选条。
-    private func processRimeKey(_ keyName: String, modifiers: [String]) -> RimeSnapshot? {
+    private func processRimeKey(
+        _ keyName: String,
+        modifiers: [String],
+        allowSpecialInputExpansion: Bool = true
+    ) -> RimeSnapshot? {
         guard let rimeSession else { return nil }
         let previousSnapshot = currentRimeSnapshot
         if let pageBackward = RimeInputPolicy.candidatePageBackward(
@@ -1830,6 +2065,17 @@ final class TypingChaoInputController: IMKInputController {
             return RimeSnapshot(
                 dictionary: rimeSession.changePageBackward(pageBackward)
             )
+        }
+        if allowSpecialInputExpansion,
+           let specialInputExpansionKind = SpecialInputExpansionCatalog.kind(
+               forSpecialTriggerSelectionKey: keyName,
+               snapshot: previousSnapshot
+           ) {
+            rimeSession.clearComposition()
+            pendingSpecialInputExpansionKind = specialInputExpansionKind
+            var snapshotDictionary = rimeSession.currentSnapshot()
+            snapshotDictionary["handled"] = true
+            return RimeSnapshot(dictionary: snapshotDictionary)
         }
         var snapshot = RimeSnapshot(
             dictionary: rimeSession.processKey(keyName, modifiers: modifiers)

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { sendNativeMessage, subscribeNativeMessage } from "./nativeBridge";
 
 interface CandidateItem {
@@ -12,6 +12,13 @@ interface CandidateState {
   candidateList: CandidateItem[];
   highlightedIndex: number;
   isAIInputTriggerVisible: boolean;
+  isSpecialInputExpansionVisible: boolean;
+  specialInputExpansionTitle: string;
+  isSpecialInputExpansionTriggerVisible: boolean;
+  specialInputExpansionTriggerInsertIndex: number;
+  specialInputExpansionTriggerLabelText: string;
+  specialInputExpansionTriggerText: string;
+  specialInputExpansionTriggerWidthPoint: number;
   hasPageControls: boolean;
   pageText: string;
   isPreviousPageEnabled: boolean;
@@ -22,13 +29,61 @@ const emptyCandidateState: CandidateState = {
   candidateList: [],
   highlightedIndex: -1,
   isAIInputTriggerVisible: false,
+  isSpecialInputExpansionVisible: false,
+  specialInputExpansionTitle: "",
+  isSpecialInputExpansionTriggerVisible: false,
+  specialInputExpansionTriggerInsertIndex: -1,
+  specialInputExpansionTriggerLabelText: "",
+  specialInputExpansionTriggerText: "",
+  specialInputExpansionTriggerWidthPoint: 0,
   hasPageControls: false,
   pageText: "",
   isPreviousPageEnabled: false,
   isNextPageEnabled: false,
 };
 
-// 候选视觉和悬停交给 Tailwind 页面处理，点击只回传索引让 Swift 执行真实 librime 动作。
+function selectCandidate(candidateIndex: number) {
+  sendNativeMessage("candidateAction", {
+    actionName: "selectCandidate",
+    candidateIndex,
+  });
+}
+
+function selectSpecialInputExpansion() {
+  sendNativeMessage("candidateAction", {
+    actionName: "selectSpecialInputExpansion",
+  });
+}
+
+// 日期和时间扩展使用独立候选布局，普通 Rime 候选仍保持原有横向候选条。
+function SpecialInputExpansionList({ candidateState }: { candidateState: CandidateState }) {
+  return (
+    <main className="candidate-shell candidate-shell-special-expansion">
+      <div className="candidate-special-expansion-list" role="listbox" aria-label={`${candidateState.specialInputExpansionTitle}格式`}>
+        {candidateState.candidateList.map((candidateItem, candidateIndex) => {
+          const isHighlighted = candidateIndex === candidateState.highlightedIndex;
+          const candidateClassName = isHighlighted
+            ? "candidate-special-expansion-item candidate-special-expansion-item-highlighted"
+            : "candidate-special-expansion-item";
+          return (
+            <button
+              aria-selected={isHighlighted}
+              className={candidateClassName}
+              key={`${candidateItem.labelText}-${candidateItem.textValue}-${candidateIndex}`}
+              type="button"
+              onClick={() => selectCandidate(candidateIndex)}
+            >
+              <span className="candidate-special-expansion-label">{candidateItem.labelText}</span>
+              <span className="candidate-special-expansion-text">{candidateItem.textValue}</span>
+            </button>
+          );
+        })}
+      </div>
+    </main>
+  );
+}
+
+// 候选视觉交给 React 页面处理，点击只回传索引让 Swift 执行真实输入动作。
 export default function CandidateApp() {
   const [candidateState, setCandidateState] = useState(emptyCandidateState);
 
@@ -41,6 +96,10 @@ export default function CandidateApp() {
     sendNativeMessage("webViewReady", { viewName: "candidate" });
     return unsubscribeHandler;
   }, []);
+
+  if (candidateState.isSpecialInputExpansionVisible) {
+    return <SpecialInputExpansionList candidateState={candidateState} />;
+  }
 
   return (
     <main className="candidate-shell">
@@ -56,34 +115,44 @@ export default function CandidateApp() {
             candidateClassName += " candidate-item-ai-trigger";
           }
           return (
-            <button
-              className={candidateClassName}
-              key={`${candidateItem.labelText}-${candidateItem.textValue}-${candidateIndex}`}
-              style={{ width: `${candidateItem.widthPoint}px` }}
-              type="button"
-              onClick={() =>
-                sendNativeMessage("candidateAction", {
-                  actionName: "selectCandidate",
-                  candidateIndex,
-                })
-              }
-            >
-              {isAIInputTrigger ? (
-                <>
-                  <span className="candidate-label">1</span>
-                  <span className="candidate-ai-mark">✦</span>
-                  <span className="candidate-text">AI</span>
-                </>
-              ) : (
-                <>
-                  <span className="candidate-label">{candidateItem.labelText}</span>
-                  <span className="candidate-text">{candidateItem.textValue}</span>
-                  {candidateItem.commentText ? (
-                    <span className="candidate-comment">{candidateItem.commentText}</span>
-                  ) : null}
-                </>
-              )}
-            </button>
+            <Fragment key={`${candidateItem.labelText}-${candidateItem.textValue}-${candidateIndex}`}>
+              <button
+                className={candidateClassName}
+                style={{ width: `${candidateItem.widthPoint}px` }}
+                type="button"
+                onClick={() => selectCandidate(candidateIndex)}
+              >
+                {isAIInputTrigger ? (
+                  <>
+                    <span className="candidate-label">1</span>
+                    <span className="candidate-ai-mark">✦</span>
+                    <span className="candidate-text">AI</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="candidate-label">{candidateItem.labelText}</span>
+                    <span className="candidate-text">{candidateItem.textValue}</span>
+                    {candidateItem.commentText ? (
+                      <span className="candidate-comment">{candidateItem.commentText}</span>
+                    ) : null}
+                  </>
+                )}
+              </button>
+              {candidateState.isSpecialInputExpansionTriggerVisible &&
+              candidateIndex === candidateState.specialInputExpansionTriggerInsertIndex ? (
+                <button
+                  aria-label={`展开${candidateState.specialInputExpansionTriggerText}格式`}
+                  className="candidate-item candidate-item-special-trigger"
+                  style={{ width: `${candidateState.specialInputExpansionTriggerWidthPoint}px` }}
+                  type="button"
+                  onClick={selectSpecialInputExpansion}
+                >
+                  <span className="candidate-label">{candidateState.specialInputExpansionTriggerLabelText}</span>
+                  <span className="candidate-special-trigger-icon">▦</span>
+                  <span className="candidate-text">{candidateState.specialInputExpansionTriggerText}</span>
+                </button>
+              ) : null}
+            </Fragment>
           );
         })}
       </div>

@@ -910,3 +910,85 @@ html[data-view-name="candidate"] #root {
   font-size: 15px;
   font-weight: 500;
 }
+
+.candidate-shell-special-expansion {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 6px;
+  overflow: hidden;
+  border: 1px solid rgba(38, 38, 38, 0.16);
+  border-radius: 9px;
+  background: rgba(250, 250, 250, 0.98);
+  box-shadow: 0 5px 18px rgba(20, 28, 35, 0.18);
+  color: #242424;
+}
+
+.candidate-special-expansion-list {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  gap: 1px;
+}
+
+.candidate-special-expansion-item {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  flex: 1 1 30px;
+  min-height: 28px;
+  width: 100%;
+  padding: 0 8px 0 2px;
+  border: 0;
+  border-radius: 5px;
+  color: #303030;
+  background: transparent;
+  cursor: default;
+  text-align: left;
+}
+
+.candidate-special-expansion-item:hover,
+.candidate-special-expansion-item-highlighted {
+  color: #ffffff;
+  background: #00b878;
+}
+
+.candidate-special-expansion-label {
+  color: #7c7c7c;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.candidate-special-expansion-item:hover .candidate-special-expansion-label,
+.candidate-special-expansion-item-highlighted .candidate-special-expansion-label {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.candidate-special-expansion-text {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-item-special-trigger {
+  grid-template-columns: 16px 18px minmax(0, 1fr);
+}
+
+.candidate-special-trigger-icon {
+  align-self: center;
+  color: var(--text-secondary);
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.candidate-item-highlighted .candidate-special-trigger-icon {
+  color: rgba(255, 255, 255, 0.82);
+}
