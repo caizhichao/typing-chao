@@ -1101,6 +1101,13 @@ final class TypingChaoInputController: IMKInputController {
             if hasStoredSchema {
                 _ = rimeSession.selectSchema(schemaIdentifier)
             }
+        } else {
+            // 无偏好时强制回退全拼，避免 Rime 的 previously_selected_schema 长期停留在双拼/五笔导致敲全拼无候选
+            let schemaList = rimeSession.schemaList()
+            if schemaList.contains(where: { ($0["identifier"] as? String) == "typing_pinyin" }) {
+                _ = rimeSession.selectSchema("typing_pinyin")
+                InputMethodSettings.shared.setSelectedSchemaIdentifier("typing_pinyin")
+            }
         }
         for optionState in InputMethodSettings.shared.persistedRimeOptionStateList() {
             _ = rimeSession.setOption(
