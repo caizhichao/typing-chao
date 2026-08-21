@@ -74,7 +74,6 @@ const swiftFiles = [
   join(sourceRoot, "AIInputCommand.swift"),
   join(sourceRoot, "AIInputSelection.swift"),
   join(sourceRoot, "InputMethodSettings.swift"),
-  join(sourceRoot, "TypingChaoWebView.swift"),
   join(sourceRoot, "InputMethodSettingsWindow.swift"),
   join(sourceRoot, "InputMethodApplicationDelegate.swift"),
   join(sourceRoot, "InputMethodMenu.swift"),
@@ -120,7 +119,6 @@ const linkArguments = [
   "-framework", "AppKit",
   "-framework", "Carbon",
   "-framework", "InputMethodKit",
-  "-framework", "WebKit",
   "-o", executablePath,
 ];
 run("swiftc", linkArguments);
@@ -142,7 +140,7 @@ function copyRimeData() {
   cpSync(join(sourceResourcesRoot, "TypingChaoAppIcon.pdf"), join(resourcesRoot, "TypingChaoAppIcon.pdf"));
   cpSync(join(sourceResourcesRoot, "TypingChaoAppIcon.icns"), join(resourcesRoot, "TypingChaoAppIcon.icns"));
   cpSync(join(sourceResourcesRoot, "TypingChaoMenuIconV4.pdf"), join(resourcesRoot, "TypingChaoMenuIconV4.pdf"));
-  cpSync(webUIBuildRoot, join(resourcesRoot, "WebUI"), { recursive: true });
+  if (existsSync(webUIBuildRoot)) cpSync(webUIBuildRoot, join(resourcesRoot, "WebUI"), { recursive: true });
   cpSync(join(sourceResourcesRoot, "ThirdPartyLicenses"), join(resourcesRoot, "ThirdPartyLicenses"), { recursive: true });
   for (const localizationName of ["en.lproj", "zh-Hans.lproj", "zh_CN.lproj"]) {
     cpSync(join(sourceResourcesRoot, localizationName), join(resourcesRoot, localizationName), { recursive: true });

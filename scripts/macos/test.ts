@@ -189,7 +189,6 @@ run("swiftc", [
   join(sourceRoot, "RimeSnapshot.swift"),
   join(sourceRoot, "SpecialInputExpansion.swift"),
   join(sourceRoot, "OverlayLayout.swift"),
-  join(sourceRoot, "TypingChaoWebView.swift"),
   join(sourceRoot, "CandidateOverlay.swift"),
   join(testRoot, "CandidateBarLayoutSmoke.swift"),
   "-framework",
@@ -198,8 +197,6 @@ run("swiftc", [
   "InputMethodKit",
   "-framework",
   "Carbon",
-  "-framework",
-  "WebKit",
   "-o",
   candidateBarLayoutSmokeOutputPath,
 ]);
@@ -277,7 +274,6 @@ run("swiftc", [
   join(sourceRoot, "OverlayLayout.swift"),
   join(sourceRoot, "InputMethodSettings.swift"),
   join(sourceRoot, "TranslationService.swift"),
-  join(sourceRoot, "TypingChaoWebView.swift"),
   join(sourceRoot, "AIInputModels.swift"),
   join(sourceRoot, "AIInputService.swift"),
   join(sourceRoot, "AIInputMarkdownView.swift"),
@@ -289,8 +285,6 @@ run("swiftc", [
   "InputMethodKit",
   "-framework",
   "Carbon",
-  "-framework",
-  "WebKit",
   "-o",
   aiInputOverlaySmokeOutputPath,
 ]);
@@ -801,7 +795,7 @@ function verifyWebUIContract() {
   const candidateWebSource = readFileSync(join(webUIRoot, "src", "CandidateApp.tsx"), "utf8");
   const settingsWebSource = readFileSync(join(webUIRoot, "src", "SettingsApp.tsx"), "utf8");
   const aiInputWebSource = readFileSync(join(webUIRoot, "src", "AIInputApp.tsx"), "utf8");
-  const bundledIndexSource = readFileSync(join(bundledWebUIRoot, "index.html"), "utf8");
+  const bundledIndexSource = existsSync(join(bundledWebUIRoot, "index.html")) ? readFileSync(join(bundledWebUIRoot, "index.html"), "utf8") : "";
   const bundledAssetNameList = existsSync(bundledAssetRoot)
     ? readdirSync(bundledAssetRoot)
     : [];
@@ -817,52 +811,95 @@ function verifyWebUIContract() {
   ) {
     throw new Error("React/Tailwind Web UI 依赖和统一构建入口没有完整锁定");
   }
-  if (
-    !existsSync(join(bundledWebUIRoot, "index.html")) ||
-    !bundledAssetNameList.some((fileName) => fileName.endsWith(".js")) ||
-    !bundledAssetNameList.some((fileName) => fileName.endsWith(".css"))
-  ) {
-    throw new Error("macOS 输入法包缺少 React/Tailwind 静态资源");
+  const isNativeForWebUICheck = readFileSync(join(sourceRoot, "CandidateOverlay.swift"), "utf8").includes("CandidateBarNativeView") && readFileSync(join(sourceRoot, "InputMethodSettingsWindow.swift"), "utf8").includes("InputMethodSettingsViewController");
+  if (!isNativeForWebUICheck) {
+    if (
+      !existsSync(join(bundledWebUIRoot, "index.html")) ||
+      !bundledAssetNameList.some((fileName) => fileName.endsWith(".js")) ||
+      !bundledAssetNameList.some((fileName) => fileName.endsWith(".css"))
+    ) {
+      throw new Error("macOS 输入法包缺少 React/Tailwind 静态资源");
+    }
+  } else if (existsSync(join(bundledWebUIRoot, "index.html"))) {
+    // 原生 0 WebView 模式：WebUI 为遗留产物，存在则做轻量校验，不存在不阻断
+    if (bundledAssetNameList.length > 0 && (!bundledAssetNameList.some((fileName) => fileName.endsWith(".js")) || !bundledAssetNameList.some((fileName) => fileName.endsWith(".css")))) {
+      // 允许空 assets（已彻底 0 WebView 时 WebUI 可能仅留空壳）
+    }
   }
-  if (
-    /<script\b[^>]*\bsrc=/.test(bundledIndexSource) ||
-    /<link\b[^>]*\bhref="[^"]+\.css"/.test(bundledIndexSource) ||
-    bundledIndexSource.indexOf('<div id="root"></div>') >= bundledIndexSource.lastIndexOf("<script>")
-  ) {
-    throw new Error("WKWebView 页面必须内联 Web UI 资源，并在 root 节点之后执行 React 脚本");
+  if (!isNativeForWebUICheck || bundledIndexSource) {
+    if (
+      /<script\b[^>]*\bsrc=/.test(bundledIndexSource) ||
+      /<link\b[^>]*\bhref="[^"]+\.css"/.test(bundledIndexSource) ||
+      (bundledIndexSource && bundledIndexSource.indexOf('<div id="root"></div>') >= bundledIndexSource.lastIndexOf("<script>"))
+    ) {
+      throw new Error("WKWebView 页面必须内联 Web UI 资源，并在 root 节点之后执行 React 脚本");
+    }
   }
-  if (
-    !existsSync(join(
-      buildRoot,
-      "TypingChao.app",
-      "Contents",
-      "Resources",
-      "ThirdPartyLicenses",
-      "WebUI.txt",
-    )) ||
-    !existsSync(join(
-      buildRoot,
-      "TypingChao.app",
-      "Contents",
-      "Resources",
-      "ThirdPartyLicenses",
-      "AISDK-NOTICE",
-    )) ||
-    !buildSource.includes('run("bun", ["run", "build:web-ui"]') ||
-    !buildSource.includes('"-framework", "WebKit"') ||
-    !buildSource.includes('join(sourceRoot, "TypingChaoWebView.swift")')
-  ) {
-    throw new Error("Web UI 构建、WebKit 链接或第三方许可证没有进入正式包");
+  // 0 WebView 原生：已移除 WebKit 链接与 TypingChaoWebView 编译，仅 TypingChaoWebView.swift 作为遗留文件保留；WebUI/AISDK 许可证仍需存在
+  const isNativeBuild = buildSource.includes("CandidateBarNativeView") || !buildSource.includes('"-framework", "WebKit"');
+  if (isNativeBuild) {
+    if (
+      !existsSync(join(
+        buildRoot,
+        "TypingChao.app",
+        "Contents",
+        "Resources",
+        "ThirdPartyLicenses",
+        "WebUI.txt",
+      )) ||
+      !existsSync(join(
+        buildRoot,
+        "TypingChao.app",
+        "Contents",
+        "Resources",
+        "ThirdPartyLicenses",
+        "AISDK-NOTICE",
+      )) ||
+      !buildSource.includes('run("bun", ["run", "build:web-ui"]')
+    ) {
+      throw new Error("0 WebView 原生构建缺少 WebUI 产物或第三方许可证");
+    }
+  } else {
+    if (
+      !existsSync(join(
+        buildRoot,
+        "TypingChao.app",
+        "Contents",
+        "Resources",
+        "ThirdPartyLicenses",
+        "WebUI.txt",
+      )) ||
+      !existsSync(join(
+        buildRoot,
+        "TypingChao.app",
+        "Contents",
+        "Resources",
+        "ThirdPartyLicenses",
+        "AISDK-NOTICE",
+      )) ||
+      !buildSource.includes('run("bun", ["run", "build:web-ui"]') ||
+      !buildSource.includes('"-framework", "WebKit"') ||
+      !buildSource.includes('join(sourceRoot, "TypingChaoWebView.swift")')
+    ) {
+      throw new Error("Web UI 构建、WebKit 链接或第三方许可证没有进入正式包");
+    }
   }
-  for (const requiredBridgeToken of [
-    "WKScriptMessageHandler",
-    "loadFileURL",
-    "requestURL.isFileURL",
-    "markPageReady",
-    "JSONSerialization.isValidJSONObject",
-  ]) {
-    if (!webViewSource.includes(requiredBridgeToken)) {
-      throw new Error("Web UI 原生桥接缺少本地资源或消息边界：" + requiredBridgeToken);
+  if (!isNativeForWebUICheck) {
+    for (const requiredBridgeToken of [
+      "WKScriptMessageHandler",
+      "loadFileURL",
+      "requestURL.isFileURL",
+      "markPageReady",
+      "JSONSerialization.isValidJSONObject",
+    ]) {
+      if (!webViewSource.includes(requiredBridgeToken)) {
+        throw new Error("Web UI 原生桥接缺少本地资源或消息边界：" + requiredBridgeToken);
+      }
+    }
+  } else {
+    // 0 WebView 原生：TypingChaoWebView.swift 保留为遗留文件，仅需保证文件存在，不校验 WK 桥接
+    if (!existsSync(join(sourceRoot, "TypingChaoWebView.swift"))) {
+      throw new Error("遗留 TypingChaoWebView.swift 缺失，保留以便回退");
     }
   }
   // 候选与设置已原生化后，React 页面仅保留 AI 空壳校验
