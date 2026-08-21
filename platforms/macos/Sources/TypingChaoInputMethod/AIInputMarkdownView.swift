@@ -172,21 +172,44 @@ final class AIInputMarkdownView: NSView {
         return r2
     }
 
-    private static func codeBlockAttributedString(code: String, language: String) -> NSAttributedString {
+    // 对齐 ai-elements CodeBlock(shiki one-light/one-dark-pro + lineNumberTransformer)：等宽+圆角段落+语言头+行号前缀（可缺省）
+    private static func codeBlockAttributedString(code: String, language: String, showLineNumbers: Bool = false) -> NSAttributedString {
         let mono = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         let header = language.isEmpty ? "" : "\(language)\n"
-        let full = header + code
+        let body: String
+        if showLineNumbers {
+            let lines = code.components(separatedBy: "\n")
+            body = lines.enumerated().map { String(format: "%3d  %@", $0.offset + 1, $0.element) }.joined(separator: "\n")
+        } else {
+            body = code
+        }
+        let full = header + body
         let attr = NSMutableAttributedString(string: full, attributes: [
             .font: mono,
             .foregroundColor: NSColor.labelColor,
             .backgroundColor: NSColor.controlBackgroundColor,
         ])
-        // 添加圆角背景的段落样式近似（用 paragraph + 背景色）。
         let para = NSMutableParagraphStyle(); para.lineSpacing = 2; para.paragraphSpacing = 4
         attr.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: attr.length))
         if !language.isEmpty {
             attr.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: NSRange(location: 0, length: min(header.count, attr.length)))
             attr.addAttribute(.font, value: NSFont.systemFont(ofSize: 9), range: NSRange(location: 0, length: min(header.count, attr.length)))
+        }
+        if showLineNumbers {
+            // 行号段淡色，body 段保持 labelColor（已由整体设置覆盖，仅 header 需特殊）
+            let bodyStart = header.count
+            if bodyStart < attr.length {
+                // 将数字前缀段设为 tertiary，降低视觉权重，近似 shiki 行号列
+                let lines = body.components(separatedBy: "\n")
+                var pos = bodyStart
+                for line in lines {
+                    let numLen = min(5, line.count)
+                    if pos + numLen <= attr.length {
+                        attr.addAttribute(.foregroundColor, value: NSColor.tertiaryLabelColor, range: NSRange(location: pos, length: numLen))
+                    }
+                    pos += line.count + 1
+                }
+            }
         }
         return attr
     }

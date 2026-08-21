@@ -463,6 +463,9 @@ final class AIInputOverlayNativeView: NSView {
             if let first = state.pendingSources.first, let url = first.url {
                 let web = makeWebPreviewView(urlString: url, title: first.title)
                 stackView.addArrangedSubview(web)
+                // open-in-chat 等价：同一 URL 的外部打开入口（避免与 WebPreview 重复标题，复用同一 URL）
+                let openInChat = makeOpenInChatView(urlString: url, title: first.title)
+                stackView.addArrangedSubview(openInChat)
             }
             // Checkpoint 分隔（有工具调用时在 body 前插入分隔，对齐 TS Checkpoint）
             if !state.pendingToolCalls.isEmpty && !state.pendingAssistantText.isEmpty {
@@ -571,9 +574,9 @@ final class AIInputOverlayNativeView: NSView {
 
     // MARK: - ai-elements 全量补充（Queue/ChainOfThought/Task/Context/Artifact/Plan/Checkpoint/InlineCitation/Suggestion/WebPreview/Confirmation/Image）
 
-    private func makeChainOfThoughtView(text: String, isStreaming: Bool = false) -> NSView {
+    private func makeChainOfThoughtView(text: String, isStreaming: Bool = false, durationMs: Int? = nil) -> NSView {
         let box = NSBox(); box.boxType = .custom; box.cornerRadius = 8; box.borderColor = NSColor.separatorColor
-        box.title = isStreaming ? "思考中…" : "思考过程"
+        if let ms = durationMs, ms > 0 { box.title = isStreaming ? "思考中… · \(ms)ms" : "思考过程 · \(ms)ms" } else { box.title = isStreaming ? "思考中…" : "思考过程" }
         box.titlePosition = .atTop
         let body = NSTextField(wrappingLabelWithString: text)
         body.font = NSFont.systemFont(ofSize: 11); body.textColor = .secondaryLabelColor
@@ -810,6 +813,36 @@ final class AIInputOverlayNativeView: NSView {
 
     @objc private func handleWebPreviewClick(_ sender: NSClickGestureRecognizer) {
         guard let view = sender.view, let raw = view.identifier?.rawValue, let url = URL(string: raw) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    // open-in-chat: 外链跳转等价（对齐 ai-elements open-in-chat: github/scira/vercel 等 Provider）
+    // 输入法浮层内以「在外部打开」按钮承载，避免 DropdownMenu 噪音，同时保留 isPresented 语义。
+    private func makeOpenInChatView(urlString: String, title: String? = nil) -> NSView {
+        let box = NSBox(); box.boxType = .custom; box.cornerRadius = 8; box.borderColor = .separatorColor
+        box.title = title != nil ? "在外部打开 · \(title!)" : "在外部打开"
+        let link = NSTextField(labelWithString: urlString)
+        link.font = NSFont.systemFont(ofSize: 10); link.textColor = .systemBlue
+        link.isSelectable = true
+        let btn = NSButton(title: "打开", target: nil, action: nil)
+        btn.bezelStyle = .rounded; btn.controlSize = .small
+        btn.identifier = NSUserInterfaceItemIdentifier(urlString)
+        btn.target = self; btn.action = #selector(handleOpenInChatClick(_:))
+        let row = NSStackView(views: [link, btn]); row.orientation = .horizontal; row.spacing = 8
+        box.contentView?.addSubview(row); row.translatesAutoresizingMaskIntoConstraints = false
+        if let cv = box.contentView {
+            NSLayoutConstraint.activate([
+                row.leadingAnchor.constraint(equalTo: cv.leadingAnchor, constant: 8),
+                row.trailingAnchor.constraint(equalTo: cv.trailingAnchor, constant: -8),
+                row.topAnchor.constraint(equalTo: cv.topAnchor, constant: 8),
+                row.bottomAnchor.constraint(equalTo: cv.bottomAnchor, constant: -8),
+            ])
+        }
+        return box
+    }
+
+    @objc private func handleOpenInChatClick(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue, let url = URL(string: raw) else { return }
         NSWorkspace.shared.open(url)
     }
 
