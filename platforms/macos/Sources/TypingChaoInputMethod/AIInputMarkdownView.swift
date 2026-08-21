@@ -144,14 +144,33 @@ final class AIInputMarkdownView: NSView {
         return result
     }
 
+    // 解析 ![alt](url) 仅保留 alt 文本 + 链接标注（输入法浮层不内嵌网络图片，避免 file:// CSP 与进程体积，回退为 Sources 链接）。
+    private static func stripImageMarkdown(_ text: String) -> String {
+        guard let re = try? NSRegularExpression(pattern: #"!\[([^\]]*)\]\(([^)]+)\)"#) else { return text }
+        let ns = text as NSString
+        var out = text
+        var off = 0
+        for m in re.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let alt = ns.substring(with: m.range(at: 1))
+            let url = ns.substring(with: m.range(at: 2))
+            let rep = alt.isEmpty ? "[图片] \(url)" : "\(alt) [\(url)]"
+            let r = m.range
+            let adj = NSRange(location: r.location+off, length: r.length)
+            out = (out as NSString).replacingCharacters(in: adj, with: rep)
+            off += rep.count - r.length
+        }
+        return out
+    }
+
     private static func inlineAttributedString(_ text: String) -> NSAttributedString {
+        let stripped = stripImageMarkdown(text)
         let baseFont = NSFont.systemFont(ofSize: 11.5)
         let mono = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        let r = NSMutableAttributedString(string: text, attributes: [.font: baseFont, .foregroundColor: NSColor.labelColor])
+        let r = NSMutableAttributedString(string: stripped, attributes: [.font: baseFont, .foregroundColor: NSColor.labelColor])
         // `code`
         let codePattern = try? NSRegularExpression(pattern: "`([^`]+)`")
-        let ns = (text as NSString)
-        let matches = codePattern?.matches(in: text, range: NSRange(location: 0, length: ns.length)) ?? []
+        let ns = (stripped as NSString)
+        let matches = codePattern?.matches(in: stripped, range: NSRange(location: 0, length: ns.length)) ?? []
         for m in matches.reversed() {
             let range = m.range(at: 1)
             let full = m.range(at: 0)
