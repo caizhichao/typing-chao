@@ -1,5 +1,16 @@
 @import "tailwindcss";
 
+@theme {
+  --color-background: var(--surface-strong);
+  --color-foreground: var(--text-primary);
+  --color-card: var(--surface-strong);
+  --color-muted: var(--surface-muted);
+  --color-muted-foreground: var(--text-tertiary);
+  --color-border: var(--border);
+  --color-primary: var(--accent);
+  --color-secondary: var(--surface-muted);
+}
+
 :root {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
   color-scheme: light dark;
@@ -458,7 +469,15 @@ html[data-view-name="ai-input"] body {
 
 .ai-compact {
   justify-content: flex-start;
+  overflow: hidden;
 }
+
+.ai-expanded {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 
 .ai-header {
   display: flex;
@@ -584,6 +603,28 @@ html[data-view-name="ai-input"] body {
 
 .message-error {
   color: var(--danger);
+  max-height: 280px;
+  overflow-y: auto;
+  word-break: break-word;
+}
+
+
+/* ai-sdk.dev/elements 在 file:// 输入法弹窗内的适配：保持原有 ai-shell 玻璃风格，仅对 Elements 的容器做轻量覆盖 */
+.chat-elements {
+  /* 复用原 chat-transcript 的卡片背景，但让 Elements 的滚动语义生效 */
+  flex: 1;
+  min-height: 0;
+  margin: 12px 0 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+  border-radius: 11px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.chat-elements [data-radix-scroll-area-viewport] {
+  scrollbar-width: thin;
 }
 
 .message-pending {

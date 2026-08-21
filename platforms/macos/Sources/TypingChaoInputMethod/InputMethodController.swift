@@ -256,6 +256,9 @@ final class TypingChaoInputController: IMKInputController {
     }
 
     override func deactivateServer(_ sender: Any!) {
+        if isActiveAIInputController {
+            return
+        }
         // AI 面板可见时仍由当前控制器处理面板按键，不能因辅助层回调提前结束会话。
         if isAIInputPresentationActive {
             overlayManager.restoreAIInputPresentation()
@@ -519,6 +522,43 @@ final class TypingChaoInputController: IMKInputController {
         if aiInputCommandState.isPending,
            inputKeyName != "Return" {
             discardPendingAIInputCommand(client: client)
+        }
+        // 统一符号直通：可打印单字符（包含 Shift 符号）在未被上游消费时直接走确认输入，避免依赖宿主二次分发导致 paseo 等客户端收不到 `^`。
+        if TranslationPolicy.passThroughText(for: inputKeyName) != nil,
+           // `=` 由 AI 候选链单独处理，此处不再重复直通。
+           inputKeyName != AIInputCommandState.triggerText {
+            if currentRimeSnapshot.isComposing, let rimeSession {
+                let committedSnapshot = RimeSnapshot(dictionary: rimeSession.commitComposition())
+                if !committedSnapshot.commitText.isEmpty {
+                    handleConfirmedTextInput(
+                        committedSnapshot.commitText,
+                        client: client,
+                        shouldScheduleTranslation: false
+                    )
+                }
+                rimeSession.clearComposition()
+                currentRimeSnapshot = RimeSnapshot(dictionary: rimeSession.currentSnapshot())
+                candidateOverlay.hide()
+                refreshMarkedText(client: client, snapshot: currentRimeSnapshot)
+            }
+            if isTranslationDraftModeActive {
+                let sourceSnapshot = translationDraft.appendConfirmedText(
+                    inputKeyName,
+                    clientIdentifier: currentTranslationSessionIdentifier()
+                )
+                refreshMarkedText(client: client, snapshot: currentRimeSnapshot)
+                if let sourceSnapshot {
+                    scheduleTranslation(fallbackSnapshot: sourceSnapshot, client: client, userInitiated: false)
+                } else {
+                    showTranslationDraftWaiting(client: client)
+                }
+                candidateOverlay.hide()
+                return true
+            }
+            commitOriginalTranslationDraft(client: client, includesCurrentComposition: false)
+            insertConfirmedText(inputKeyName, client: client)
+            candidateOverlay.hide()
+            return true
         }
         guard inputKeyName == "Return" else {
             return super.inputText(string, client: sender)
@@ -1188,7 +1228,9 @@ final class TypingChaoInputController: IMKInputController {
             )
             return true
         }
-        return true
+        // 未处理的普通按键退出扩展模式并交回主链，避免扩展状态常驻导致后续拼音无法输入。
+        _ = clearSpecialInputExpansion(client: client)
+        return false
     }
 
     // 选中日期或时间主词后先清理原拼音，再在同一光标位置展示固定时间快照的扩展候选。
@@ -1503,7 +1545,7 @@ final class TypingChaoInputController: IMKInputController {
         return false
     }
 
-    // 未被 Rime 接管的确定文本进入内部草稿；未知编辑动作先确认原文再交还宿主。
+    // 未被 Rime 接管的确定文本统一走确认输入链；兼容所有 Shift 符号与中英文模式，避免依赖宿主 inputText 分发。
     private func handleUnhandledKey(_ keyName: String, client: IMKTextInput) -> Bool {
         if keyName == "Shift_L" || keyName == "Shift_R" {
             return false
@@ -1513,8 +1555,28 @@ final class TypingChaoInputController: IMKInputController {
             candidateOverlay.hide()
             return false
         }
+        // 非翻译模式或无视翻译的状态下仍需统一收口当前组合，再直接提交符号文本，避免残留 preedit 或依赖 inputText 二次分发。
+        if currentRimeSnapshot.isComposing {
+            if let rimeSession {
+                let committedSnapshot = RimeSnapshot(dictionary: rimeSession.commitComposition())
+                if !committedSnapshot.commitText.isEmpty {
+                    handleConfirmedTextInput(
+                        committedSnapshot.commitText,
+                        client: client,
+                        shouldScheduleTranslation: false
+                    )
+                }
+                rimeSession.clearComposition()
+                currentRimeSnapshot = RimeSnapshot(dictionary: rimeSession.currentSnapshot())
+                candidateOverlay.hide()
+                refreshMarkedText(client: client, snapshot: currentRimeSnapshot)
+            }
+        }
         guard isTranslationDraftModeActive else {
-            return false
+            commitOriginalTranslationDraft(client: client, includesCurrentComposition: false)
+            insertConfirmedText(passThroughText, client: client)
+            candidateOverlay.hide()
+            return true
         }
         let sourceSnapshot = translationDraft.appendConfirmedText(
             passThroughText,

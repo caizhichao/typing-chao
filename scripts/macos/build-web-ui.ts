@@ -28,12 +28,35 @@ function inlineWebUIAssets() {
     throw new Error("Web UI 构建产物缺少可内联的脚本或样式");
   }
 
-  const scriptSource = readGeneratedAsset(scriptMatch[1]).replace(/<\/script/gi, "<\\/script");
+  let scriptSource = readGeneratedAsset(scriptMatch[1]).replace(/<\/script/gi, "<\\/script");
+  // 入口被内联到顶层 index.html 后，动态 import 的 ./xxx.js 会解析为顶层路径，但 chunk 实际在 ./assets/xxx.js
+  // 需重写为 ./assets/xxx.js 以适配 file:// WKWebView 的相对路径（覆盖 import/from/映射表）
+  // 精确的 import/from 优先，再补映射表的裸路径，最后广义兜底（已是 ./assets/ 的不二次加工）
+  scriptSource = scriptSource.replaceAll('import("./', 'import("./assets/');
+  scriptSource = scriptSource.replaceAll("import('./", "import('./assets/");
+  scriptSource = scriptSource.replaceAll('import(`./', 'import(`./assets/');
+  scriptSource = scriptSource.replaceAll('from "./', 'from "./assets/');
+  scriptSource = scriptSource.replaceAll("from './", "from './assets/");
+  scriptSource = scriptSource.replaceAll("from `./", "from `./assets/");
+  scriptSource = scriptSource.replaceAll('["./', '["./assets/');
+  scriptSource = scriptSource.replaceAll("['./", "['./assets/");
+  scriptSource = scriptSource.replaceAll('","./', '","./assets/');
+  scriptSource = scriptSource.replaceAll("','./", "','./assets/");
+  // 广义兜底仅当未被上面覆盖时（已是 ./assets/ 的由上面处理过，不会再匹配 "./ 后的非 assets）
+  // 为避免 ./assets/ -> ./assets/assets/，先保护
+  const placeholder = "__ASSETS_PLACEHOLDER__/";
+  scriptSource = scriptSource.replaceAll('"./assets/', `"__ASSETS_PLACEHOLDER__/`);
+  scriptSource = scriptSource.replaceAll("'./assets/", "'__ASSETS_PLACEHOLDER__/");
+  scriptSource = scriptSource.replaceAll('"./', '"./assets/');
+  scriptSource = scriptSource.replaceAll("'./", "'./assets/");
+  scriptSource = scriptSource.replaceAll('"__ASSETS_PLACEHOLDER__/', '"./assets/');
+  scriptSource = scriptSource.replaceAll("'__ASSETS_PLACEHOLDER__/", "'./assets/");
   const styleSource = readGeneratedAsset(styleMatch[1]).replace(/<\/style/gi, "<\\/style");
   indexSource = indexSource
     .replace(scriptMatch[0], "")
     .replace(styleMatch[0], () => `<style>${styleSource}</style>`)
-    .replace("</body>", () => `<script>${scriptSource}</script>\n  </body>`);
+    .replace("</body>", () => `<script>${scriptSource}</script>
+  </body>`);
   writeFileSync(indexPath, indexSource);
 }
 

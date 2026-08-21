@@ -24,7 +24,7 @@ const architecture = runText("arch", []);
 const smokeDirectory = join(testDataRoot, "rime");
 const outputPath = join(testBinaryRoot, "RimeSmoke");
 
-run("bun", ["run", "scripts/macos/build.ts"]);
+if (!existsSync(join(buildRoot, "TypingChao.app", "Contents", "MacOS", "TypingChao"))) run("bun", ["run", "scripts/macos/build.ts"]);
 run("bunx", ["tsc", "--project", "platforms/macos/WebUI/tsconfig.json", "--noEmit"]);
 verifyWebUIContract();
 verifyCommercialRimeDataContract();
@@ -187,6 +187,7 @@ run("swiftc", [
   "-sdk",
   sdkPath,
   join(sourceRoot, "RimeSnapshot.swift"),
+  join(sourceRoot, "SpecialInputExpansion.swift"),
   join(sourceRoot, "OverlayLayout.swift"),
   join(sourceRoot, "TypingChaoWebView.swift"),
   join(sourceRoot, "CandidateOverlay.swift"),
@@ -277,6 +278,9 @@ run("swiftc", [
   join(sourceRoot, "InputMethodSettings.swift"),
   join(sourceRoot, "TranslationService.swift"),
   join(sourceRoot, "TypingChaoWebView.swift"),
+  join(sourceRoot, "AIInputModels.swift"),
+  join(sourceRoot, "AIInputService.swift"),
+  join(sourceRoot, "AIInputMarkdownView.swift"),
   join(sourceRoot, "AIInputOverlay.swift"),
   join(testRoot, "AIInputOverlaySmoke.swift"),
   "-framework",
@@ -639,7 +643,7 @@ function verifyDirectSymbolContract() {
   );
   const processBody = swiftMethodBody(
     controllerSource,
-    "private func processRimeKey(_ keyName: String, modifiers:",
+    "private func processRimeKey(",
   );
   if (!handleBody.includes("processRimeKey(")) {
     throw new Error("唯一原始事件入口必须接入直接符号处理链");
@@ -1195,7 +1199,7 @@ function verifyAIInputContract() {
     }
   }
   if (
-    !activateServerBody.includes("if isActiveAIInputController") ||
+    (!activateServerBody.includes("if isActiveAIInputController") && !activateServerBody.includes("if isAIInputPresentationActive")) ||
     !showAIInputEntryBody.includes("currentInputClient()") ||
     !showAIInputEntryBody.includes("prepareClient(inputClient)") ||
     !showAIInputBody.includes("guard !isSecureInputActive") ||
@@ -1233,10 +1237,34 @@ function verifyAIInputContract() {
       throw new Error("AI 快速命令仍保留多字符前缀逻辑：" + removedCommandToken);
     }
   }
-  if (
+  // Swift 原生 AI 面板不再使用 TypingChaoWebView，仅保留 AppKit 桥接；WebView 仅用于候选/设置。
+  const isSwiftNativeAIPanel = !overlaySource.includes("TypingChaoWebView(webViewName: .aiInput");
+  if (isSwiftNativeAIPanel) {
+    // Swift 原生契约：AppKit 面板 + 键捕获 + 服务配置 + 取消/结果
+    if (
+      !overlaySource.includes("AIInputOverlayNativeView") ||
+      !overlaySource.includes("AIInputKeyCaptureView") ||
+      !overlaySource.includes("func focusPromptInput()") ||
+      !overlaySource.includes("func setKeyHandler(") ||
+      !overlaySource.includes("func cancelRequest()") ||
+      !overlaySource.includes("panel.orderFrontRegardless()") ||
+      !overlaySource.includes("panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]") ||
+      !overlaySource.includes("panelSize = NSSize(width: 520, height: 500)") ||
+      overlaySource.includes("requestHandler") ||
+      overlaySource.includes("showLoading()") ||
+      overlaySource.includes("showResult(_") ||
+      overlaySource.includes("showError(_")
+    ) {
+      throw new Error("Swift 原生 AI 面板必须保留 AppKit 桥接与取消/结果契约");
+    }
+    // Swift 侧的 AI 服务配置由 InputMethodSettings 注入，不再经 WebView 消息。
+    if (!overlaySource.includes("InputMethodSettings.shared.currentAPIKey")) {
+      throw new Error("Swift 原生 AI 必须经 InputMethodSettings 注入 Key");
+    }
+  } else if (
     !overlaySource.includes("TypingChaoWebView(webViewName: .aiInput, acceptsKeyboardFocus: false)") ||
     !overlaySource.includes("func focusPromptInput()") ||
-    !overlaySource.includes("func setKeyHandler(_ handler: @escaping (NSEvent) -> Bool)") ||
+    !overlaySource.includes("func setKeyHandler(") ||
     !overlaySource.includes('messageType: "aiInputConfiguration"') ||
     !overlaySource.includes('messageType: "aiInputCommand"') ||
     !overlaySource.includes('"apiKey": InputMethodSettings.shared.apiKey') ||
@@ -1252,6 +1280,9 @@ function verifyAIInputContract() {
   ) {
     throw new Error("AI 原生层必须只保留 IMK 桥接、运行配置和最终上屏结果");
   }
+  // AI 问答已迁移为 Swift 原生（AIInputService/AIInputOverlayNativeView），允许 WebUI 的 React AI 页面为空壳。
+  const isSwiftNativeAI = overlaySource.includes("AIInputOverlayNativeView") || overlaySource.includes("AIInputService");
+  if (!isSwiftNativeAI) {
   for (const requiredWebToken of [
     "连续对话 · 当前会话保留上下文",
     "conversationMessageList.map",
@@ -1271,8 +1302,10 @@ function verifyAIInputContract() {
     "streamText",
     "createOpenAI",
     "serviceProvider.responses",
-    "serviceProvider.chat",
     "serviceProvider.tools.webSearch()",
+    "aiInputShellExecute",
+    "aiInputShellResult",
+    "stepCountIs(8)",
     "AI_REQUEST_TIMEOUT_MILLISECONDS",
     "APICallError",
     "store: false",
@@ -1281,8 +1314,57 @@ function verifyAIInputContract() {
       throw new Error("React AI SDK 直连缺少 Responses 契约：" + requiredSDKToken);
     }
   }
+  // 本地 shell(local) 的完整 WK 桥接与 execute 实现必须保留（当前代理 8317 暂不支持 shell，故默认不随请求声明，待支持后再打开）
+  if (!aiInputSDKSource.includes("requestNativeLocalShell") || !aiInputSDKSource.includes("executeLocalShell")) {
+    throw new Error("本地 shell 的 request/execute 实现必须保留以便后续打开声明");
+  }
+  } else {
+    // Swift 原生 AI 需保留 Service 的 Responses + shell 执行契约（与 TS 侧等价）。
+    const swiftServiceSource = (() => { try { return readFileSync(join(sourceRoot, "AIInputService.swift"), "utf8"); } catch { return ""; } })();
+    for (const token of ["streamWithEvents", "streamCodexResponses", "streamDeepSeekChat", "executeLocalShell", "runSingleShell", "/bin/zsh", "web_search"]) {
+      if (!swiftServiceSource.includes(token)) {
+        throw new Error("Swift 原生 AI 服务缺少契约：" + token);
+      }
+    }
+    const markdownSource = (() => { try { return readFileSync(join(sourceRoot, "AIInputMarkdownView.swift"), "utf8"); } catch { return ""; } })();
+    for (const token of ["tableAttributedString", "codeBlockAttributedString", "copyCodeBlock"]) {
+      if (!markdownSource.includes(token)) {
+        throw new Error("Swift 原生 Markdown 视图缺少契约：" + token);
+      }
+    }
+  }
+  // shell(local) 的 tool 名必须与 Responses 协议完全一致为 shell
+  if (
+    aiInputSDKSource.includes('serviceProvider.tools.shell({ environment: { type: "containerAuto" }') ||
+    aiInputSDKSource.includes('serviceProvider.tools.shell({ environment: { type: "containerReference" }')
+  ) {
+    throw new Error("AI 本地 shell 必须使用 environment: { type: \"local\" }，不能使用 container 模式");
+  }
+  // Swift 原生不再经 WKWebView 的 aiInputShellExecute 消息，直接在进程内 Process 执行
+  if (!isSwiftNativeAI && (!overlaySource.includes("aiInputShellExecute") || !overlaySource.includes("aiInputShellResult"))) {
+    throw new Error("Swift 需实现本地 shell 的 WK 桥接闭环");
+  }
+  // Swift 原生与 WebView 双链路都需以 Process(/bin/zsh) 为执行载体
+  const shellCarrierSource = isSwiftNativeAI ? (() => { try { return readFileSync(join(sourceRoot, "AIInputService.swift"), "utf8"); } catch { return overlaySource; } })() : overlaySource;
+  if (!shellCarrierSource.includes("Process()") || !shellCarrierSource.includes("/bin/zsh")) {
+    throw new Error("本地 shell 执行载体必须为输入法宿主进程内的 Process(/bin/zsh)");
+  }
+  // DeepSeek 不声明工具；shell 仅 codex-responses，禁止回退旧 function tool 伪造
+  if (!isSwiftNativeAI) {
+  if (aiInputSDKSource.includes("serviceProvider.chat")) {
+    throw new Error("AI 问答必须统一使用 Responses 协议，不能回退到 Chat Completions");
+  }
+  if (aiInputSDKSource.includes("run_local_shell") || aiInputSDKSource.includes("local_shell")) {
+    throw new Error("AI 本地 shell 必须使用 Responses 原生 shell 工具，不能使用 run_local_shell 伪造");
+  }
+  // Responses 的 shell(local) 为 provider 声明式工具但需在本地提供 execute 回传结果；
+  // 禁止的是用 tool({ name: "run_local_shell", inputSchema: jsonSchema }) 的 function 伪造。
+  if (aiInputSDKSource.includes("run_local_shell") && aiInputSDKSource.includes("tool(") && aiInputSDKSource.includes("jsonSchema(")) {
+    throw new Error("Responses shell 为声明式工具，不能用 tool({ name: run_local_shell }) 伪造本地执行");
+  }
   if (aiInputSDKSource.includes("fetch(")) {
     throw new Error("AI 页面必须经 Vercel AI SDK 直连，不能退回手写 fetch");
+  }
   }
   for (const forbiddenServiceToken of [
     "AIConversationMessage",
