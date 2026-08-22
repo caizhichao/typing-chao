@@ -461,6 +461,8 @@ final class TypingChaoInputController: IMKInputController {
                     suppressNextHostReturnAfterAICommand = false
                 } else if aiInputOverlay.acceptsPromptInput {
                     aiInputOverlay.submitPrompt()
+                } else if aiInputOverlay.canCommitResult {
+                    aiInputOverlay.commitResult()
                 }
             }
             return true
@@ -1831,8 +1833,9 @@ final class TypingChaoInputController: IMKInputController {
             return true
         }
         if event.modifierFlags.contains(.command) {
-            if keyName == "Return", aiInputOverlay.canCommitResult {
-                aiInputOverlay.commitResult()
+            if keyName == "Return" {
+                if aiInputOverlay.canCommitResult { aiInputOverlay.commitResult(); return true }
+                if aiInputOverlay.acceptsPromptInput { aiInputOverlay.submitPrompt(); return true }
                 return true
             }
             if event.charactersIgnoringModifiers?.lowercased() == "v",
@@ -1843,8 +1846,15 @@ final class TypingChaoInputController: IMKInputController {
             }
             return true
         }
-        if keyName == "Return", !currentRimeSnapshot.isComposing {
-            aiInputOverlay.submitPrompt()
+        if keyName == "Return" {
+            if currentRimeSnapshot.isComposing {
+                // 将当前拼音已上屏部分与 preedit 一并并入 prompt 后提交，符合用户 Enter 即发送的预期
+                if !currentRimeSnapshot.commitText.isEmpty { aiInputOverlay.appendPromptText(currentRimeSnapshot.commitText) }
+                if !currentRimeSnapshot.preeditText.isEmpty { aiInputOverlay.appendPromptText(currentRimeSnapshot.preeditText) }
+                clearAIInputComposition()
+            }
+            if aiInputOverlay.acceptsPromptInput { aiInputOverlay.submitPrompt() }
+            else if aiInputOverlay.canCommitResult { aiInputOverlay.commitResult() }
             return true
         }
         let previousSnapshot = currentRimeSnapshot

@@ -120,7 +120,11 @@ final class AIInputOverlayNativeView: NSView {
     private var isPromptEnabled: Bool = true
 
     var acceptsPromptInput: Bool { isPromptEnabled }
-    var canCommitResult: Bool { state.conversationMessages.last?.role == .assistant && !(state.conversationMessages.last?.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }
+    var canCommitResult: Bool {
+        if let last = state.conversationMessages.last, last.role == .assistant, !(last.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) { return true }
+        if state.pendingState != .none, !(state.pendingAssistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) { return true }
+        return false
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -212,7 +216,15 @@ final class AIInputOverlayNativeView: NSView {
     func triggerShellToolCalls() { applyState() }
     func denyShellToolCalls() { state.pendingToolCalls.removeAll { $0.toolName == "shell" && $0.state == .inputAvailable }; applyState() }
     func clearForHide() { currentTask?.cancel(); currentTask = nil; pendingImageTask?.cancel(); pendingImageTask = nil; state = AIInputState(); applyState() }
-    func commitResult() { guard canCommitResult, let last = state.conversationMessages.last?.content else { return }; commitHandler?(last) }
+    func commitResult() {
+        guard canCommitResult else { return }
+        if let last = state.conversationMessages.last, last.role == .assistant, !last.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            commitHandler?(last.content); return
+        }
+        if !state.pendingAssistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            commitHandler?(state.pendingAssistantText); return
+        }
+    }
 
     private func handleStreamEvent(_ e: AIStreamEvent) {
         switch e {
