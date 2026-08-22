@@ -186,7 +186,6 @@ final class AIInputOverlayNativeView: NSView {
         let conversationSnapshot = state.conversationMessages
         let service = AIInputService()
         aiService = service
-        resultHandler?(state.pendingPromptText)
         currentTask = Task { [weak self] in
             do {
                 let result = try await service.streamWithEvents(configuration: config, promptText: prompt, conversationMessages: conversationSnapshot) { [weak self] event in
