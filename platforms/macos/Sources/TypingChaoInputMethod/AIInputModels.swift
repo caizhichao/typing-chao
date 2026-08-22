@@ -79,7 +79,7 @@ struct AIInputState {
     var pendingToolCalls: [AIToolCall] = []
     var pendingState: AIPendingState = .none
     var isPromptInputEnabled: Bool = true
-    var isExpandedLayout: Bool = false
+    var isExpandedLayout: Bool = true
 }
 
 enum AIPendingState: String {

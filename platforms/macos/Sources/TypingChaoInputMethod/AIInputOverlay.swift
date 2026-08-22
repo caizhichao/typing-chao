@@ -56,7 +56,7 @@ final class AIInputOverlay {
         isPresented = true
         currentAnchor = anchor
         contentView.reset(prefilledPromptText: prefilledPromptText)
-        setPanelSize(Self.emptyPanelSize, anchor: anchor)
+        setPanelSize(Self.panelSize, anchor: anchor)
         if anchor == nil { panel.center() }
         restorePresentation()
     }
@@ -144,7 +144,7 @@ final class AIInputOverlayNativeView: NSView {
         state = AIInputState()
         if !prefilledPromptText.isEmpty { state.promptText = prefilledPromptText }
         isPromptEnabled = true
-        expandedLayoutHandler?(false)
+        expandedLayoutHandler?(true)
         applyState()
         focusPromptInput()
     }
@@ -360,7 +360,9 @@ final class AIInputOverlayNativeView: NSView {
         for v in stackView.arrangedSubviews { stackView.removeArrangedSubview(v); v.removeFromSuperview() }
 
         let isExpanded = state.isExpandedLayout
-        scrollView.isHidden = !isExpanded
+        // 保持 transcript 始终可见，避免 164px 收起态被误认为白板；高度由 expandedLayoutHandler 决定的面板尺寸自然约束
+        scrollView.isHidden = false
+        _ = isExpanded
 
         // prompt enabled border always reflects state, even in collapsed (164px) mode.
         if isPromptEnabled {
@@ -370,8 +372,6 @@ final class AIInputOverlayNativeView: NSView {
             promptContainer.layer?.borderColor = NSColor.separatorColor.cgColor
             promptContainer.layer?.borderWidth = 1
         }
-
-        if !isExpanded { return }
 
         if state.conversationMessages.isEmpty && state.pendingState == .none {
             // 复刻 ai-elements: Artifact + Plan + Suggestions（空态全量展示）
