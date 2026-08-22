@@ -360,7 +360,7 @@ final class TypingChaoInputController: IMKInputController {
             suppressNextHostReturnAfterAICommand = false
             return true
         }
-        if overlayManager.isAIInputVisible {
+        if overlayManager.isAIInputVisible || overlayManager.isAIInputPresented {
             return handleAIInputKey(event: event, keyName: keyName, client: client)
         }
         if specialInputExpansionState != nil {
@@ -448,7 +448,7 @@ final class TypingChaoInputController: IMKInputController {
         }
         prepareClient(client)
         // AI 面板仍复用当前控制器的 IMK 会话；同一轮 Return 可能再次经 inputText 回传，必须全部截断，不能交给宿主。
-        if overlayManager.isAIInputVisible {
+        if overlayManager.isAIInputVisible || overlayManager.isAIInputPresented {
             let aiInputOverlay = ensureAIInputOverlay()
             guard let inputKeyName = TranslationPolicy.rimeKeyName(for: string) else {
                 return true
