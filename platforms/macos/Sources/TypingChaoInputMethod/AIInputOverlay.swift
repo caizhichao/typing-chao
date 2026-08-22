@@ -245,6 +245,7 @@ final class AIInputOverlayNativeView: NSView {
 
     private func applyError(_ msg: String) {
         state.pendingState = .error; state.pendingAssistantText = msg; isPromptEnabled = true
+        state.isExpandedLayout = true; expandedLayoutHandler?(true)
         applyState()
     }
 
