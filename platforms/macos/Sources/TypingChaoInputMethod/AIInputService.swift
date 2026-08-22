@@ -198,7 +198,12 @@ final class AIInputService: @unchecked Sendable {
                     if t == "tool_call" || t == "function_call" {
                         let id = (item["id"] as? String) ?? (item["call_id"] as? String) ?? "tool-\(toolCalls.count)"
                         let name = (item["name"] as? String) ?? (item["function"] as? [String: Any])?["name"] as? String ?? "tool"
-                        toolCalls.append(AIToolCall(id: id, toolName: name, input: item["arguments"] ?? item["input"], output: nil, isError: false, state: .inputAvailable))
+                        let rawArg: Any? = item["arguments"] ?? item["input"]
+                        let parsedInput: Any? = {
+                            if let s = rawArg as? String, let d = s.data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) { return o }
+                            return rawArg
+                        }()
+                        toolCalls.append(AIToolCall(id: id, toolName: name, input: parsedInput, output: nil, isError: false, state: .inputAvailable))
                     }
                 }
             case "response.function_call_arguments.delta":
@@ -266,6 +271,25 @@ final class AIInputService: @unchecked Sendable {
     // MARK: - 本地 shell（与 TS/Overlay 的 Process 保持一致）
 
     func executeLocalShell(toolCall: AIToolCall) async -> AILocalShellResult {
+        if let rawInput = toolCall.input as? String, let d = rawInput.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+            let commands = (obj["commands"] as? [String]) ?? []
+            let timeout = (obj["timeoutMs"] as? Int).map { Double($0)/1000.0 } ?? Self.perCommandTimeout
+            let maxLen = (obj["maxOutputLength"] as? Int) ?? Self.maxTotalOutputLength
+            return await withCheckedContinuation { cont in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    var entries: [AILocalShellResult.Entry] = []
+                    for cmd in commands {
+                        let t = cmd.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !t.isEmpty else { entries.append(.init(stdout: "", stderr: "skip", outcome: .exit(code: 1))); continue }
+                        let (out, err, code, timedOut) = self.runSingleShell(commandText: t, timeout: max(1, min(timeout, 120)))
+                        let ml = max(512, min(maxLen, 16384))
+                        if timedOut { entries.append(.init(stdout: String(out.prefix(ml)), stderr: err.isEmpty ? "timeout" : String(err.prefix(ml)), outcome: .timeout)) }
+                        else { entries.append(.init(stdout: String(out.prefix(ml)), stderr: String(err.prefix(ml)), outcome: .exit(code: code))) }
+                    }
+                    cont.resume(returning: AILocalShellResult(output: entries))
+                }
+            }
+        }
         let dict = toolCall.input as? [String: Any]
         let commands = (dict?["commands"] as? [String]) ?? []
         let timeout = (dict?["timeoutMs"] as? Int).map { Double($0)/1000.0 } ?? Self.perCommandTimeout

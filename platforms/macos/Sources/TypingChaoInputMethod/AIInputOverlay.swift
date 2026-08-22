@@ -116,6 +116,7 @@ final class AIInputOverlayNativeView: NSView {
     private var state = AIInputState()
     private var aiService: AIInputService?
     private var currentTask: Task<Void, Never>?
+    private var pendingImageTask: URLSessionDataTask?
     private var isPromptEnabled: Bool = true
 
     var acceptsPromptInput: Bool { isPromptEnabled }
@@ -208,8 +209,10 @@ final class AIInputOverlayNativeView: NSView {
         }
     }
 
-    func cancelRequest() { currentTask?.cancel(); currentTask = nil; isPromptEnabled = true; applyState() }
-    func clearForHide() { currentTask?.cancel(); currentTask = nil; state = AIInputState(); applyState() }
+    func cancelRequest() { currentTask?.cancel(); currentTask = nil; pendingImageTask?.cancel(); pendingImageTask = nil; isPromptEnabled = true; applyState() }
+    func triggerShellToolCalls() { applyState() }
+    func denyShellToolCalls() { state.pendingToolCalls.removeAll { $0.toolName == "shell" && $0.state == .inputAvailable }; applyState() }
+    func clearForHide() { currentTask?.cancel(); currentTask = nil; pendingImageTask?.cancel(); pendingImageTask = nil; state = AIInputState(); applyState() }
     func commitResult() { guard canCommitResult, let last = state.conversationMessages.last?.content else { return }; commitHandler?(last) }
 
     private func handleStreamEvent(_ e: AIStreamEvent) {
@@ -459,28 +462,27 @@ final class AIInputOverlayNativeView: NSView {
                 let citView = makeInlineCitationView(citations: Array(cites))
                 stackView.addArrangedSubview(citView)
             }
-            // WebPreview：对第一个来源给出 web 预览（对齐 TS WebPreview）
+            // WebPreview：同一来源仅展示单张预览卡（避免与 OpenInChat 重复）
             if let first = state.pendingSources.first, let url = first.url {
                 let web = makeWebPreviewView(urlString: url, title: first.title)
                 stackView.addArrangedSubview(web)
-                // open-in-chat 等价：同一 URL 的外部打开入口（避免与 WebPreview 重复标题，复用同一 URL）
-                let openInChat = makeOpenInChatView(urlString: url, title: first.title)
-                stackView.addArrangedSubview(openInChat)
             }
             // Checkpoint 分隔（有工具调用时在 body 前插入分隔，对齐 TS Checkpoint）
             if !state.pendingToolCalls.isEmpty && !state.pendingAssistantText.isEmpty {
                 let cp = makeCheckpointView(label: "已完成 \(state.pendingToolCalls.count) 个工具调用")
                 stackView.addArrangedSubview(cp)
             }
+            pendingImageTask?.cancel()
             // Image：从正文提取 ![alt](http...) 的首个图片 URL 作缩略（对齐 ai-elements Image；输入法内仅加载 http/https，base64 由 Tool 透传；失败静默）。
             if let imgURLString = Self.firstImageURL(in: state.pendingAssistantText), let url = URL(string: imgURLString), let host = url.host, !host.isEmpty {
                 // 轻量占位：避免阻塞 applyState，主线程异步尝试取图（超时 3s，失败仅保留链接文本）。
                 let placeholder = makeImageView(image: NSImage(size: NSSize(width: 200, height: 120)), alt: imgURLString)
                 stackView.addArrangedSubview(placeholder)
                 // 异步替换：后台取图后回到主线程更新（不阻塞输入链）。
-                URLSession.shared.dataTask(with: url) { data, _, _ in
+                let task = URLSession.shared.dataTask(with: url) { data, _, _ in
                     guard let data, let img = NSImage(data: data) else { return }
-                    DispatchQueue.main.async {
+                    DispatchQueue.main.async { [weak placeholder] in
+                        guard let placeholder else { return }
                         // 找到 placeholder 的 imageView 并替换（placeholder 内首个 NSImageView）
                         func findImageView(in v: NSView) -> NSImageView? {
                             if let iv = v as? NSImageView { return iv }
@@ -489,11 +491,12 @@ final class AIInputOverlayNativeView: NSView {
                         }
                         findImageView(in: placeholder)?.image = img
                     }
-                }.resume()
+                }
+                self.pendingImageTask = task; task.resume()
             }
-            // Confirmation：shell 工具在 streaming 期间需要确认态（对齐 TS Confirmation）
-            if state.pendingToolCalls.contains(where: { $0.toolName == "shell" }) && state.pendingState == .streaming {
-                let confirm = makeConfirmationView(toolName: "shell", question: "本地 shell 将在输入法进程执行，确认继续？")
+            // Confirmation：仅当存在待确认的 shell 时展示一次（避免每帧重复）
+            if state.pendingToolCalls.contains(where: { $0.toolName == "shell" && $0.state == .inputAvailable }) {
+                let confirm = makeConfirmationView(toolName: "shell", question: "本地 shell 将在输入法进程执行，确认继续？", onConfirm: { [weak self] in self?.triggerShellToolCalls() }, onDeny: { [weak self] in self?.denyShellToolCalls() })
                 stackView.addArrangedSubview(confirm)
             }
         }
